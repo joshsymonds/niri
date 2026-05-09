@@ -47,7 +47,7 @@ use self::spatial_movement_grab::SpatialMovementGrab;
 #[cfg(feature = "dbus")]
 use crate::dbus::freedesktop_a11y::KbMonBlock;
 use crate::layout::scrolling::ScrollDirection;
-use crate::layout::{ActivateWindow, HorizontalDirection, LayoutElement as _};
+use crate::layout::{ActivateWindow, LayoutElement as _};
 use crate::niri::{CastTarget, PointerVisibility, State};
 use crate::ui::mru::{WindowMru, WindowMruUi};
 use crate::ui::screenshot_ui::ScreenshotUi;
@@ -1901,7 +1901,7 @@ impl State {
                     let target_col_idx = self
                         .niri
                         .layout
-                        .cross_monitor_target_col(HorizontalDirection::Left);
+                        .cross_monitor_target_col(ScrollDirection::Left);
                     self.niri
                         .layout
                         .move_column_to_output(&output, None, target_col_idx, true);
@@ -1921,7 +1921,7 @@ impl State {
                     let target_col_idx = self
                         .niri
                         .layout
-                        .cross_monitor_target_col(HorizontalDirection::Right);
+                        .cross_monitor_target_col(ScrollDirection::Right);
                     self.niri
                         .layout
                         .move_column_to_output(&output, None, target_col_idx, true);

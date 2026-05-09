@@ -511,14 +511,6 @@ pub enum ActivateWindow {
     No,
 }
 
-/// Direction of a horizontal column move, used to interpret the
-/// `cross_monitor_column_insert` option for cross-monitor moves.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum HorizontalDirection {
-    Left,
-    Right,
-}
-
 /// Where to put a newly added window.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum AddWindowTarget<'a, W: LayoutElement> {
@@ -1832,7 +1824,7 @@ impl<W: LayoutElement> Layout<W> {
             }
         }
 
-        let target_col_idx = self.cross_monitor_target_col(HorizontalDirection::Left);
+        let target_col_idx = self.cross_monitor_target_col(ScrollDirection::Left);
         self.move_column_to_output(output, None, target_col_idx, true);
         true
     }
@@ -1844,7 +1836,7 @@ impl<W: LayoutElement> Layout<W> {
             }
         }
 
-        let target_col_idx = self.cross_monitor_target_col(HorizontalDirection::Right);
+        let target_col_idx = self.cross_monitor_target_col(ScrollDirection::Right);
         self.move_column_to_output(output, None, target_col_idx, true);
         true
     }
@@ -1853,14 +1845,14 @@ impl<W: LayoutElement> Layout<W> {
     /// the configured `cross_monitor_column_insert` option and the direction
     /// the move is going. Used by edge-fallthrough binds and the explicit
     /// `MoveColumnToMonitorLeft`/`Right` action handlers.
-    pub(crate) fn cross_monitor_target_col(&self, going: HorizontalDirection) -> Option<usize> {
+    pub(crate) fn cross_monitor_target_col(&self, going: ScrollDirection) -> Option<usize> {
         match self.options.layout.cross_monitor_column_insert {
             niri_config::CrossMonitorColumnInsert::AfterActive => None,
             niri_config::CrossMonitorColumnInsert::Adjacent => match going {
                 // Going left = arriving at the right edge of the dest.
-                HorizontalDirection::Left => Some(usize::MAX),
+                ScrollDirection::Left => Some(usize::MAX),
                 // Going right = arriving at the left edge of the dest.
-                HorizontalDirection::Right => Some(0),
+                ScrollDirection::Right => Some(0),
             },
         }
     }
@@ -3409,6 +3401,16 @@ impl<W: LayoutElement> Layout<W> {
         }
     }
 
+    /// Move the active column to another output's workspace.
+    ///
+    /// `target_ws_idx`: workspace index on the destination monitor;
+    /// `None` falls back to the destination's active workspace.
+    ///
+    /// `target_col_idx`: where the column lands within the destination workspace.
+    /// `None` preserves the after-active default. `Some(N)` is clamped to
+    /// `[0, dest_columns.len()]` inside `ScrollingSpace::add_column`, so
+    /// `Some(usize::MAX)` is a legitimate "right edge" sentinel — callers do
+    /// not need to compute the destination's column count themselves.
     pub fn move_column_to_output(
         &mut self,
         output: &Output,
