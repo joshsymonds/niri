@@ -570,6 +570,10 @@ enum Op {
         output_id: usize,
         #[proptest(strategy = "proptest::option::of(0..=4usize)")]
         target_ws_idx: Option<usize>,
+        #[proptest(
+            strategy = "proptest::option::of(prop_oneof![Just(0usize), Just(usize::MAX), 0..=10usize])"
+        )]
+        target_col_idx: Option<usize>,
         activate: bool,
     },
     SwitchPresetColumnWidth,
@@ -1221,6 +1225,7 @@ impl Op {
             Op::MoveColumnToOutput {
                 output_id: id,
                 target_ws_idx,
+                target_col_idx,
                 activate,
             } => {
                 let name = format!("output{id}");
@@ -1228,7 +1233,7 @@ impl Op {
                     return;
                 };
 
-                layout.move_column_to_output(&output, target_ws_idx, None, activate);
+                layout.move_column_to_output(&output, target_ws_idx, target_col_idx, activate);
             }
             Op::MoveWorkspaceDown => layout.move_workspace_down(),
             Op::MoveWorkspaceUp => layout.move_workspace_up(),
@@ -3446,6 +3451,7 @@ fn move_column_to_workspace_unfocused_with_multiple_monitors() {
         Op::MoveColumnToOutput {
             output_id: 1,
             target_ws_idx: Some(0),
+            target_col_idx: None,
             activate: false,
         },
         Op::FocusOutput(1),
