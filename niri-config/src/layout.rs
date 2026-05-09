@@ -114,6 +114,8 @@ pub struct LayoutPart {
     pub preset_window_heights: Option<Vec<PresetSize>>,
     #[knuffel(child, unwrap(argument))]
     pub center_focused_column: Option<CenterFocusedColumn>,
+    #[knuffel(child, unwrap(argument))]
+    pub cross_monitor_column_insert: Option<CrossMonitorColumnInsert>,
     #[knuffel(child)]
     pub always_center_single_column: Option<Flag>,
     #[knuffel(child)]
@@ -170,6 +172,19 @@ pub enum CenterFocusedColumn {
     OnOverflow,
 }
 
+#[derive(knuffel::DecodeScalar, Debug, Default, PartialEq, Eq, Clone, Copy)]
+pub enum CrossMonitorColumnInsert {
+    /// New column lands after the destination's currently active column
+    /// (preserves existing behavior when moving columns across monitors).
+    #[default]
+    AfterActive,
+    /// New column lands on the edge of the destination it arrived from:
+    /// the right edge if moving left, the left edge if moving right.
+    /// Up/down/named-monitor moves keep after-active behavior (no
+    /// inferable horizontal direction).
+    Adjacent,
+}
+
 impl<S> knuffel::Decode<S> for DefaultPresetSize
 where
     S: knuffel::traits::ErrorSpan,
@@ -212,18 +227,30 @@ mod tests {
 
     #[test]
     fn parse_cross_monitor_column_insert_after_active() {
-        let part = parse(r#"
+        let part = parse(
+            r#"
             cross-monitor-column-insert "after-active"
-        "#);
-        assert_debug_snapshot!(part.cross_monitor_column_insert, @"Some(AfterActive)");
+        "#,
+        );
+        assert_debug_snapshot!(part.cross_monitor_column_insert, @r"
+        Some(
+            AfterActive,
+        )
+        ");
     }
 
     #[test]
     fn parse_cross_monitor_column_insert_adjacent() {
-        let part = parse(r#"
+        let part = parse(
+            r#"
             cross-monitor-column-insert "adjacent"
-        "#);
-        assert_debug_snapshot!(part.cross_monitor_column_insert, @"Some(Adjacent)");
+        "#,
+        );
+        assert_debug_snapshot!(part.cross_monitor_column_insert, @r"
+        Some(
+            Adjacent,
+        )
+        ");
     }
 
     #[test]
