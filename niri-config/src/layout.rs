@@ -258,4 +258,27 @@ mod tests {
         let part = parse("");
         assert_debug_snapshot!(part.cross_monitor_column_insert, @"None");
     }
+
+    #[test]
+    fn cross_monitor_column_insert_default_is_after_active() {
+        assert_eq!(
+            Layout::default().cross_monitor_column_insert,
+            CrossMonitorColumnInsert::AfterActive,
+        );
+    }
+
+    #[test]
+    fn cross_monitor_column_insert_merges_from_part() {
+        let part = parse(
+            r#"
+            cross-monitor-column-insert "adjacent"
+        "#,
+        );
+        let mut layout = Layout::default();
+        layout.merge_with(&part);
+        assert_eq!(
+            layout.cross_monitor_column_insert,
+            CrossMonitorColumnInsert::Adjacent,
+        );
+    }
 }
