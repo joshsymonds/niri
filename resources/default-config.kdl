@@ -121,6 +121,17 @@ layout {
     //   together with the previously focused column.
     center-focused-column "never"
 
+    // Where a column lands when moved across monitors via the edge-fallthrough
+    // binds (Mod+Ctrl+H/L past the edge) or the explicit
+    // move-column-to-monitor-{left,right} actions. Options:
+    // - "after-active" (default): the moved column is inserted after the
+    //   destination's currently active column.
+    // - "adjacent": the moved column lands on the edge of the destination it
+    //   arrived from — the right edge when moving left, the left edge when
+    //   moving right. Up/Down/Previous/Next/Named moves keep "after-active"
+    //   behavior because they have no inferable horizontal direction.
+    cross-monitor-column-insert "after-active"
+
     // You can customize the widths that "switch-preset-column-width" (Mod+R) toggles between.
     preset-column-widths {
         // Proportion sets the width as a fraction of the output width, taking gaps into account.
