@@ -4045,7 +4045,11 @@ fn move_column_left_or_to_output_with_adjacent_lands_at_right_edge_of_dest() {
         .find(|m| m.output.name() == "output1")
         .unwrap();
     let scrolling = mon1.active_workspace_ref().scrolling();
-    assert_eq!(scrolling.columns().count(), 3, "output1 should have 3 columns");
+    assert_eq!(
+        scrolling.columns().count(),
+        3,
+        "output1 should have 3 columns"
+    );
     // Adjacent + going left = arrived from right = right edge of dest.
     assert_eq!(
         scrolling.active_column_idx(),
@@ -4098,7 +4102,11 @@ fn move_column_right_or_to_output_with_adjacent_lands_at_left_edge_of_dest() {
         .find(|m| m.output.name() == "output2")
         .unwrap();
     let scrolling = mon2.active_workspace_ref().scrolling();
-    assert_eq!(scrolling.columns().count(), 3, "output2 should have 3 columns");
+    assert_eq!(
+        scrolling.columns().count(),
+        3,
+        "output2 should have 3 columns"
+    );
     // Adjacent + going right = arrived from left = left edge of dest.
     assert_eq!(
         scrolling.active_column_idx(),
