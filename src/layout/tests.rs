@@ -4029,8 +4029,7 @@ fn move_column_left_or_to_output_with_adjacent_lands_at_right_edge_of_dest() {
             params: TestWindowParams::new(1),
         },
     ];
-    let mut layout = Layout::with_options(Clock::with_time(Duration::ZERO), options);
-    check_ops_on_layout(&mut layout, ops);
+    let mut layout = check_ops_with_options(options, ops);
 
     let output1 = layout
         .outputs()
@@ -4088,8 +4087,7 @@ fn move_column_right_or_to_output_with_adjacent_lands_at_left_edge_of_dest() {
             params: TestWindowParams::new(1),
         },
     ];
-    let mut layout = Layout::with_options(Clock::with_time(Duration::ZERO), options);
-    check_ops_on_layout(&mut layout, ops);
+    let mut layout = check_ops_with_options(options, ops);
 
     let output2 = layout
         .outputs()
@@ -4118,6 +4116,72 @@ fn move_column_right_or_to_output_with_adjacent_lands_at_left_edge_of_dest() {
         scrolling.active_column_idx(),
         0,
         "moved column should land at the left edge of the destination",
+    );
+}
+
+#[test]
+fn move_column_to_output_with_adjacent_and_no_direction_preserves_after_active() {
+    // Anti-pattern enforcement test: even with cross_monitor_column_insert
+    // set to Adjacent, calls to move_column_to_output that pass None for
+    // target_col_idx (mimicking Up/Down/Previous/Next/Named action handlers
+    // which have no inferable horizontal direction) MUST land the column
+    // after the destination's active column, not at any edge.
+    //
+    // Catches a future "helpful" change that wires those handlers through
+    // cross_monitor_target_col without thinking through that there's no
+    // defensible direction for them.
+    let options = Options {
+        layout: niri_config::Layout {
+            cross_monitor_column_insert: CrossMonitorColumnInsert::Adjacent,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddOutput(2),
+        Op::FocusOutput(2),
+        Op::AddWindow {
+            params: TestWindowParams::new(2),
+        },
+        Op::AddWindow {
+            params: TestWindowParams::new(3),
+        },
+        // Set output2's active to leftmost so after-active (= idx 1) is
+        // distinct from both edges (0 and 2).
+        Op::FocusColumnFirst,
+        Op::FocusOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+    ];
+    let mut layout = check_ops_with_options(options, ops);
+
+    let output2 = layout
+        .outputs()
+        .find(|o| o.name() == "output2")
+        .cloned()
+        .unwrap();
+
+    // Direct call mimicking the Up/Down/Named action handlers' code path:
+    // pass None for target_col_idx, regardless of the option.
+    layout.move_column_to_output(&output2, None, None, true);
+
+    let MonitorSet::Normal { monitors, .. } = &layout.monitor_set else {
+        unreachable!()
+    };
+    let mon2 = monitors
+        .iter()
+        .find(|m| m.output.name() == "output2")
+        .unwrap();
+    let scrolling = mon2.active_workspace_ref().scrolling();
+    assert_eq!(scrolling.columns().count(), 3);
+    // Active was at idx 0, so after-active = idx 1. NOT 0 (left edge) and NOT 2 (right edge).
+    assert_eq!(
+        scrolling.active_column_idx(),
+        1,
+        "with target_col_idx=None, after-active behavior must be preserved \
+         even when option is Adjacent",
     );
 }
 
