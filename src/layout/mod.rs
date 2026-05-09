@@ -511,6 +511,14 @@ pub enum ActivateWindow {
     No,
 }
 
+/// Direction of a horizontal column move, used to interpret the
+/// `cross_monitor_column_insert` option for cross-monitor moves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HorizontalDirection {
+    Left,
+    Right,
+}
+
 /// Where to put a newly added window.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum AddWindowTarget<'a, W: LayoutElement> {
@@ -1824,7 +1832,8 @@ impl<W: LayoutElement> Layout<W> {
             }
         }
 
-        self.move_column_to_output(output, None, None, true);
+        let target_col_idx = self.cross_monitor_target_col(HorizontalDirection::Left);
+        self.move_column_to_output(output, None, target_col_idx, true);
         true
     }
 
@@ -1835,8 +1844,25 @@ impl<W: LayoutElement> Layout<W> {
             }
         }
 
-        self.move_column_to_output(output, None, None, true);
+        let target_col_idx = self.cross_monitor_target_col(HorizontalDirection::Right);
+        self.move_column_to_output(output, None, target_col_idx, true);
         true
+    }
+
+    /// Compute the `target_col_idx` for a cross-monitor column move based on
+    /// the configured `cross_monitor_column_insert` option and the direction
+    /// the move is going. Used by edge-fallthrough binds and the explicit
+    /// `MoveColumnToMonitorLeft`/`Right` action handlers.
+    pub(crate) fn cross_monitor_target_col(&self, going: HorizontalDirection) -> Option<usize> {
+        match self.options.layout.cross_monitor_column_insert {
+            niri_config::CrossMonitorColumnInsert::AfterActive => None,
+            niri_config::CrossMonitorColumnInsert::Adjacent => match going {
+                // Going left = arriving at the right edge of the dest.
+                HorizontalDirection::Left => Some(usize::MAX),
+                // Going right = arriving at the left edge of the dest.
+                HorizontalDirection::Right => Some(0),
+            },
+        }
     }
 
     pub fn move_column_to_index(&mut self, index: usize) {

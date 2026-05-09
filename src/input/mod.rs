@@ -47,7 +47,7 @@ use self::spatial_movement_grab::SpatialMovementGrab;
 #[cfg(feature = "dbus")]
 use crate::dbus::freedesktop_a11y::KbMonBlock;
 use crate::layout::scrolling::ScrollDirection;
-use crate::layout::{ActivateWindow, LayoutElement as _};
+use crate::layout::{ActivateWindow, HorizontalDirection, LayoutElement as _};
 use crate::niri::{CastTarget, PointerVisibility, State};
 use crate::ui::mru::{WindowMru, WindowMruUi};
 use crate::ui::screenshot_ui::ScreenshotUi;
@@ -1898,9 +1898,13 @@ impl State {
                         self.niri.screenshot_ui.move_to_output(target_output);
                     }
                 } else if let Some(output) = self.niri.output_left() {
+                    let target_col_idx = self
+                        .niri
+                        .layout
+                        .cross_monitor_target_col(HorizontalDirection::Left);
                     self.niri
                         .layout
-                        .move_column_to_output(&output, None, None, true);
+                        .move_column_to_output(&output, None, target_col_idx, true);
                     self.niri.layout.focus_output(&output);
                     if !self.maybe_warp_cursor_to_focus_centered() {
                         self.move_cursor_to_output(&output);
@@ -1914,9 +1918,13 @@ impl State {
                         self.niri.screenshot_ui.move_to_output(target_output);
                     }
                 } else if let Some(output) = self.niri.output_right() {
+                    let target_col_idx = self
+                        .niri
+                        .layout
+                        .cross_monitor_target_col(HorizontalDirection::Right);
                     self.niri
                         .layout
-                        .move_column_to_output(&output, None, None, true);
+                        .move_column_to_output(&output, None, target_col_idx, true);
                     self.niri.layout.focus_output(&output);
                     if !self.maybe_warp_cursor_to_focus_centered() {
                         self.move_cursor_to_output(&output);
