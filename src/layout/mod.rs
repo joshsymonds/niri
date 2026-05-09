@@ -902,6 +902,7 @@ impl<W: LayoutElement> Layout<W> {
         &mut self,
         monitor_idx: usize,
         workspace_idx: usize,
+        target_col_idx: Option<usize>,
         column: Column<W>,
         activate: bool,
     ) {
@@ -914,7 +915,7 @@ impl<W: LayoutElement> Layout<W> {
             panic!()
         };
 
-        monitors[monitor_idx].add_column(workspace_idx, column, activate);
+        monitors[monitor_idx].add_column(workspace_idx, target_col_idx, column, activate);
 
         if activate {
             *active_monitor_idx = monitor_idx;
@@ -1823,7 +1824,7 @@ impl<W: LayoutElement> Layout<W> {
             }
         }
 
-        self.move_column_to_output(output, None, true);
+        self.move_column_to_output(output, None, None, true);
         true
     }
 
@@ -1834,7 +1835,7 @@ impl<W: LayoutElement> Layout<W> {
             }
         }
 
-        self.move_column_to_output(output, None, true);
+        self.move_column_to_output(output, None, None, true);
         true
     }
 
@@ -3386,6 +3387,7 @@ impl<W: LayoutElement> Layout<W> {
         &mut self,
         output: &Output,
         target_ws_idx: Option<usize>,
+        target_col_idx: Option<usize>,
         activate: bool,
     ) {
         if let MonitorSet::Normal {
@@ -3414,7 +3416,7 @@ impl<W: LayoutElement> Layout<W> {
             let workspace_idx = target_ws_idx
                 .unwrap_or(monitors[new_idx].active_workspace_idx)
                 .min(monitors[new_idx].workspaces.len() - 1);
-            self.add_column_by_idx(new_idx, workspace_idx, column, activate);
+            self.add_column_by_idx(new_idx, workspace_idx, target_col_idx, column, activate);
         }
     }
 

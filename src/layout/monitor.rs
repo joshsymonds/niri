@@ -534,10 +534,16 @@ impl<W: LayoutElement> Monitor<W> {
         );
     }
 
-    pub fn add_column(&mut self, mut workspace_idx: usize, column: Column<W>, activate: bool) {
+    pub fn add_column(
+        &mut self,
+        mut workspace_idx: usize,
+        target_col_idx: Option<usize>,
+        column: Column<W>,
+        activate: bool,
+    ) {
         let workspace = &mut self.workspaces[workspace_idx];
 
-        workspace.add_column(column, activate);
+        workspace.add_column(target_col_idx, column, activate);
 
         // After adding a new window, workspace becomes this output's own.
         if workspace.name().is_none() {
@@ -925,7 +931,7 @@ impl<W: LayoutElement> Monitor<W> {
             return;
         };
 
-        self.add_column(new_idx, column, activate);
+        self.add_column(new_idx, None, column, activate);
     }
 
     pub fn move_column_to_workspace_down(&mut self, activate: bool) {
@@ -946,7 +952,7 @@ impl<W: LayoutElement> Monitor<W> {
             return;
         };
 
-        self.add_column(new_idx, column, activate);
+        self.add_column(new_idx, None, column, activate);
     }
 
     pub fn move_column_to_workspace(&mut self, idx: usize, activate: bool) {
@@ -972,7 +978,7 @@ impl<W: LayoutElement> Monitor<W> {
             return;
         };
 
-        self.add_column(new_idx, column, activate);
+        self.add_column(new_idx, None, column, activate);
     }
 
     pub fn switch_workspace_up(&mut self) {
