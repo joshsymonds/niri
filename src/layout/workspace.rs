@@ -708,12 +708,18 @@ impl<W: LayoutElement> Workspace<W> {
         }
     }
 
-    pub fn add_column(&mut self, column: Column<W>, activate: bool) {
+    pub fn add_column(&mut self, target_col_idx: Option<usize>, column: Column<W>, activate: bool) {
         for (tile, _) in column.tiles() {
             self.enter_output_for_window(tile.window());
         }
 
-        self.scrolling.add_column(None, column, activate, None);
+        // Clamp Some(N) to [0, columns.len()] so usize::MAX is well-defined
+        // (means "after the last column"). None preserves the existing default
+        // (after-active) resolved inside ScrollingSpace::add_column.
+        let target_col_idx = target_col_idx.map(|i| i.min(self.scrolling.columns().count()));
+
+        self.scrolling
+            .add_column(target_col_idx, column, activate, None);
 
         if activate {
             self.floating_is_active = FloatingActive::No;

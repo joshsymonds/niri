@@ -1228,7 +1228,7 @@ impl Op {
                     return;
                 };
 
-                layout.move_column_to_output(&output, target_ws_idx, activate);
+                layout.move_column_to_output(&output, target_ws_idx, None, activate);
             }
             Op::MoveWorkspaceDown => layout.move_workspace_down(),
             Op::MoveWorkspaceUp => layout.move_workspace_up(),
@@ -3941,7 +3941,7 @@ fn move_column_to_output_target_col_idx_some_max_lands_at_right_edge() {
         .iter()
         .find(|m| m.output.name() == "output2")
         .unwrap();
-    let scrolling = mon2.active_workspace().scrolling();
+    let scrolling = mon2.active_workspace_ref().scrolling();
     assert_eq!(scrolling.columns().count(), 3, "dest should have 3 columns");
     // With activate=true and target_col_idx clamped to dest len, the moved
     // column lands at the rightmost index (2 of 3, zero-indexed).
@@ -3987,7 +3987,7 @@ fn move_column_to_output_target_col_idx_some_zero_lands_at_left_edge() {
         .iter()
         .find(|m| m.output.name() == "output2")
         .unwrap();
-    let scrolling = mon2.active_workspace().scrolling();
+    let scrolling = mon2.active_workspace_ref().scrolling();
     assert_eq!(scrolling.columns().count(), 3, "dest should have 3 columns");
     assert_eq!(
         scrolling.active_column_idx(),
@@ -4034,7 +4034,7 @@ fn move_column_to_output_target_col_idx_none_preserves_after_active_behavior() {
         .iter()
         .find(|m| m.output.name() == "output2")
         .unwrap();
-    let scrolling = mon2.active_workspace().scrolling();
+    let scrolling = mon2.active_workspace_ref().scrolling();
     assert_eq!(scrolling.columns().count(), 3, "dest should have 3 columns");
     // None preserves after-active behavior: previous active was at 0,
     // so the new column lands at index 1.
