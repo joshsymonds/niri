@@ -196,3 +196,39 @@ where
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use insta::assert_debug_snapshot;
+
+    use super::*;
+
+    #[track_caller]
+    fn parse(text: &str) -> LayoutPart {
+        knuffel::parse("test.kdl", text)
+            .map_err(miette::Report::new)
+            .unwrap()
+    }
+
+    #[test]
+    fn parse_cross_monitor_column_insert_after_active() {
+        let part = parse(r#"
+            cross-monitor-column-insert "after-active"
+        "#);
+        assert_debug_snapshot!(part.cross_monitor_column_insert, @"Some(AfterActive)");
+    }
+
+    #[test]
+    fn parse_cross_monitor_column_insert_adjacent() {
+        let part = parse(r#"
+            cross-monitor-column-insert "adjacent"
+        "#);
+        assert_debug_snapshot!(part.cross_monitor_column_insert, @"Some(Adjacent)");
+    }
+
+    #[test]
+    fn parse_cross_monitor_column_insert_default_when_omitted() {
+        let part = parse("");
+        assert_debug_snapshot!(part.cross_monitor_column_insert, @"None");
+    }
+}
