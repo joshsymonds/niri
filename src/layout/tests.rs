@@ -3904,6 +3904,147 @@ prop_compose! {
     }
 }
 
+#[test]
+fn move_column_to_output_target_col_idx_some_max_lands_at_right_edge() {
+    // Setup: output 1 has 1 column (id 1, the column we'll move).
+    //        output 2 has 2 columns (ids 2 and 3).
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddOutput(2),
+        Op::FocusOutput(2),
+        Op::AddWindow {
+            params: TestWindowParams::new(2),
+        },
+        Op::AddWindow {
+            params: TestWindowParams::new(3),
+        },
+        Op::FocusOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+    ];
+    let mut layout = check_ops(ops);
+
+    let output2 = layout
+        .outputs()
+        .find(|o| o.name() == "output2")
+        .cloned()
+        .unwrap();
+
+    // RED: move_column_to_output currently takes 3 args (no target_col_idx).
+    layout.move_column_to_output(&output2, None, Some(usize::MAX), true);
+
+    let MonitorSet::Normal { monitors, .. } = &layout.monitor_set else {
+        unreachable!()
+    };
+    let mon2 = monitors
+        .iter()
+        .find(|m| m.output.name() == "output2")
+        .unwrap();
+    let scrolling = mon2.active_workspace().scrolling();
+    assert_eq!(scrolling.columns().count(), 3, "dest should have 3 columns");
+    // With activate=true and target_col_idx clamped to dest len, the moved
+    // column lands at the rightmost index (2 of 3, zero-indexed).
+    assert_eq!(
+        scrolling.active_column_idx(),
+        2,
+        "moved column should be at the right edge",
+    );
+}
+
+#[test]
+fn move_column_to_output_target_col_idx_some_zero_lands_at_left_edge() {
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddOutput(2),
+        Op::FocusOutput(2),
+        Op::AddWindow {
+            params: TestWindowParams::new(2),
+        },
+        Op::AddWindow {
+            params: TestWindowParams::new(3),
+        },
+        Op::FocusOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+    ];
+    let mut layout = check_ops(ops);
+
+    let output2 = layout
+        .outputs()
+        .find(|o| o.name() == "output2")
+        .cloned()
+        .unwrap();
+
+    // RED.
+    layout.move_column_to_output(&output2, None, Some(0), true);
+
+    let MonitorSet::Normal { monitors, .. } = &layout.monitor_set else {
+        unreachable!()
+    };
+    let mon2 = monitors
+        .iter()
+        .find(|m| m.output.name() == "output2")
+        .unwrap();
+    let scrolling = mon2.active_workspace().scrolling();
+    assert_eq!(scrolling.columns().count(), 3, "dest should have 3 columns");
+    assert_eq!(
+        scrolling.active_column_idx(),
+        0,
+        "moved column should be at the left edge",
+    );
+}
+
+#[test]
+fn move_column_to_output_target_col_idx_none_preserves_after_active_behavior() {
+    // Setup: output 2 has 2 columns; we set its active to index 0
+    // (so after-active = index 1, distinct from both edges).
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddOutput(2),
+        Op::FocusOutput(2),
+        Op::AddWindow {
+            params: TestWindowParams::new(2),
+        },
+        Op::AddWindow {
+            params: TestWindowParams::new(3),
+        },
+        Op::FocusColumnFirst,
+        Op::FocusOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+    ];
+    let mut layout = check_ops(ops);
+
+    let output2 = layout
+        .outputs()
+        .find(|o| o.name() == "output2")
+        .cloned()
+        .unwrap();
+
+    // RED.
+    layout.move_column_to_output(&output2, None, None, true);
+
+    let MonitorSet::Normal { monitors, .. } = &layout.monitor_set else {
+        unreachable!()
+    };
+    let mon2 = monitors
+        .iter()
+        .find(|m| m.output.name() == "output2")
+        .unwrap();
+    let scrolling = mon2.active_workspace().scrolling();
+    assert_eq!(scrolling.columns().count(), 3, "dest should have 3 columns");
+    // None preserves after-active behavior: previous active was at 0,
+    // so the new column lands at index 1.
+    assert_eq!(
+        scrolling.active_column_idx(),
+        1,
+        "moved column should be after the previous active",
+    );
+}
+
 proptest! {
     #![proptest_config(ProptestConfig {
         cases: if std::env::var_os("RUN_SLOW_TESTS").is_none() {
