@@ -3924,6 +3924,11 @@ fn move_column_to_output_target_col_idx_some_max_lands_at_right_edge() {
         Op::AddWindow {
             params: TestWindowParams::new(3),
         },
+        // Set output2's active to leftmost so after-active (= idx 1) is
+        // distinct from right-edge (= idx 2). Without this, both behaviors
+        // coincide and the test would pass trivially even if the
+        // implementation ignored target_col_idx entirely.
+        Op::FocusColumnFirst,
         Op::FocusOutput(1),
         Op::AddWindow {
             params: TestWindowParams::new(1),
@@ -3937,7 +3942,6 @@ fn move_column_to_output_target_col_idx_some_max_lands_at_right_edge() {
         .cloned()
         .unwrap();
 
-    // RED: move_column_to_output currently takes 3 args (no target_col_idx).
     layout.move_column_to_output(&output2, None, Some(usize::MAX), true);
 
     let MonitorSet::Normal { monitors, .. } = &layout.monitor_set else {
