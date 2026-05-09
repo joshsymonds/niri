@@ -969,13 +969,18 @@ impl<W: LayoutElement> ScrollingSpace<W> {
     ) {
         let was_empty = self.columns.is_empty();
 
-        let idx = idx.unwrap_or_else(|| {
-            if was_empty {
-                0
-            } else {
-                self.active_column_idx + 1
-            }
-        });
+        // Clamp Some(N) to [0, columns.len()] so usize::MAX is well-defined
+        // (means "after the last column"). None resolves to the after-active
+        // default. Vec::insert panics if idx > len, so the clamp is required.
+        let idx = idx
+            .unwrap_or_else(|| {
+                if was_empty {
+                    0
+                } else {
+                    self.active_column_idx + 1
+                }
+            })
+            .min(self.columns.len());
 
         column.update_config(
             self.view_size,
