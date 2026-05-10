@@ -1303,6 +1303,16 @@ impl State {
                         }
                     }
                 }
+
+                // Single chokepoint for the focus-flash effect. We're inside the
+                // `keyboard_focus != focus` guard, so this only runs when focus
+                // actually changed; we're inside the `KeyboardFocus::Layout` arm,
+                // so we know the destination is a real window (not the lock screen
+                // or the screenshot UI). Layout's own active_monitor_idx has been
+                // updated by whatever action handler caused the focus change before
+                // we got here, so `start_focus_flash_on_active_monitor` lands on
+                // the right output.
+                self.niri.layout.start_focus_flash_on_active_monitor();
             }
 
             if let Some(grab) = self.niri.popup_grab.as_mut() {
