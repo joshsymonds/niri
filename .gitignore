@@ -1,4 +1,6 @@
 /target
 /result
+/worktrees
+/reference
 
 .idea
