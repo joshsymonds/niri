@@ -9,8 +9,7 @@ use std::rc::Rc;
 use std::time::Duration;
 use std::{mem, ptr, slice};
 
-use anyhow::Context as _;
-use anyhow::ensure;
+use anyhow::{ensure, Context as _};
 use calloop::timer::{TimeoutAction, Timer};
 use calloop::RegistrationToken;
 use pipewire::context::ContextRc;
@@ -35,7 +34,7 @@ use pipewire::sys::{pw_buffer, pw_check_library_version, pw_stream_queue_buffer}
 use smithay::backend::allocator::dmabuf::{AsDmabuf, Dmabuf};
 use smithay::backend::allocator::format::FormatSet;
 use smithay::backend::allocator::gbm::{GbmBuffer, GbmBufferFlags, GbmDevice};
-use smithay::backend::allocator::{Fourcc};
+use smithay::backend::allocator::Fourcc;
 use smithay::backend::drm::DrmDeviceFd;
 use smithay::backend::renderer::damage::OutputDamageTracker;
 use smithay::backend::renderer::element::utils::{Relocate, RelocateRenderElement};
@@ -63,7 +62,6 @@ use crate::utils::{get_monotonic_time, CastSessionId, CastStreamId};
 const CAST_DELAY_ALLOWANCE: Duration = Duration::from_micros(100);
 const SHM_BLOCKS: usize = 1;
 const SHM_BYTES_PER_PIXEL: usize = 4;
-
 
 const CURSOR_FORMAT: spa_video_format = SPA_VIDEO_FORMAT_BGRA;
 const CURSOR_BPP: u32 = 4;
@@ -217,13 +215,13 @@ impl<'a, E: Element> CursorData<'a, E> {
 }
 
 fn make_video_params(
-    video_formats: &Vec<VideoFormat>,
-    modifiers: &Vec<Modifier>,
+    video_formats: &[VideoFormat],
+    modifiers: &[Modifier],
     size: Size<u32, Physical>,
     refresh: u32,
     fixated: bool,
 ) -> pod::Object {
-    let modifier_property = if modifiers.len() == 0 {
+    let modifier_property = if modifiers.is_empty() {
         None
     } else {
         let dont_fixate = if (!fixated) && modifiers.len() == 1 && modifiers[0] == Modifier::Invalid
@@ -241,11 +239,11 @@ fn make_video_params(
             key: FormatProperties::VideoModifier.as_raw(),
             flags,
             value: pod::Value::Choice(ChoiceValue::Long(Choice(
-                        ChoiceFlags::empty(),
-                        ChoiceEnum::Enum {
-                            default: modifiers_i64[0],
-                            alternatives: modifiers_i64,
-                        },
+                ChoiceFlags::empty(),
+                ChoiceEnum::Enum {
+                    default: modifiers_i64[0],
+                    alternatives: modifiers_i64,
+                },
             ))),
         })
     };
@@ -262,42 +260,42 @@ fn make_video_params(
                 .iter()
                 .map(|video_format| pod::property!(FormatProperties::VideoFormat, Id, video_format))
                 .collect(),
-                match modifier_property {
-                    Some(prop) => vec![prop],
-                    None => vec![],
-                },
-                vec![
-                    pod::property!(
-                        FormatProperties::VideoSize,
-                        Rectangle,
-                        Rectangle {
-                            width: size.w,
-                            height: size.h,
-        }
-                    ),
-                    pod::property!(
-                        FormatProperties::VideoFramerate,
-                        Fraction,
-                        Fraction { num: 0, denom: 1 }
-                    ),
-                    pod::property!(
-                        FormatProperties::VideoMaxFramerate,
-                        Choice,
-                        Range,
-                        Fraction,
-                        Fraction {
-                            num: refresh,
-                            denom: 1000
-                        },
-                        Fraction { num: 1, denom: 1 },
-                        Fraction {
-                            num: refresh,
-                            denom: 1000
-        }
-                    ),
-                    ],
-                    ]
-                        .concat(),
+            match modifier_property {
+                Some(prop) => vec![prop],
+                None => vec![],
+            },
+            vec![
+                pod::property!(
+                    FormatProperties::VideoSize,
+                    Rectangle,
+                    Rectangle {
+                        width: size.w,
+                        height: size.h,
+                    }
+                ),
+                pod::property!(
+                    FormatProperties::VideoFramerate,
+                    Fraction,
+                    Fraction { num: 0, denom: 1 }
+                ),
+                pod::property!(
+                    FormatProperties::VideoMaxFramerate,
+                    Choice,
+                    Range,
+                    Fraction,
+                    Fraction {
+                        num: refresh,
+                        denom: 1000
+                    },
+                    Fraction { num: 1, denom: 1 },
+                    Fraction {
+                        num: refresh,
+                        denom: 1000
+                    }
+                ),
+            ],
+        ]
+        .concat(),
     }
 }
 
@@ -328,35 +326,43 @@ fn make_video_params_for_initial_negotiation_with_extra_buffer(
 
         trace!("offering: {modifiers:?}");
 
-        if modifiers.len() == 0 {
-            vec![
-                (make_video_params(&video_formats, &vec![], size, refresh, false), Vec::new()),
-            ]
+        if modifiers.is_empty() {
+            vec![(
+                make_video_params(&video_formats, &[], size, refresh, false),
+                Vec::new(),
+            )]
         } else {
             vec![
-                (make_video_params(&video_formats, &modifiers, size, refresh, false), Vec::new()),
-                (make_video_params(&video_formats, &vec![], size, refresh, false), Vec::new()),
+                (
+                    make_video_params(&video_formats, &modifiers, size, refresh, false),
+                    Vec::new(),
+                ),
+                (
+                    make_video_params(&video_formats, &[], size, refresh, false),
+                    Vec::new(),
+                ),
             ]
         }
     };
-    let pod_objects_with_extra_buffer = if alpha {
+
+    if alpha {
         [f(true), f(false)].concat()
     } else {
         f(false)
-    };
-    pod_objects_with_extra_buffer
+    }
 }
 
 macro_rules! make_video_params_for_initial_negotiation_macro {
     ($params:ident, $formats:expr, $size:expr, $refresh:expr, $alpha:expr) => {
-        let mut $params = make_video_params_for_initial_negotiation_with_extra_buffer($formats, $size, $refresh, $alpha);
+        let mut $params = make_video_params_for_initial_negotiation_with_extra_buffer(
+            $formats, $size, $refresh, $alpha,
+        );
         let $params: Vec<_> = $params
             .iter_mut()
             .map(|(obj, buf)| make_pod(buf, (*obj).clone()))
             .collect();
     };
 }
-
 
 impl PipeWire {
     pub fn new(
@@ -644,7 +650,7 @@ impl PipeWire {
                                 }),
                             };
 
-                            let o = make_video_params(&vec![format.format()], &vec![modifier], format_size, refresh, true);
+                            let o = make_video_params(&[format.format()], &[modifier], format_size, refresh, true);
                             let mut b = Vec::new();
                             let pod = make_pod(&mut b, o);
                             let params_1 = vec![pod];
@@ -675,7 +681,7 @@ impl PipeWire {
                                             ..
                                         } if *alpha == format_has_alpha
                                             && matches!(
-                                                extra_negotiation_result, 
+                                                extra_negotiation_result,
                                                 Some(x) if x.modifier == Modifier::from(format.modifier())
                                             ) =>
                                         {
@@ -1013,7 +1019,13 @@ impl PipeWire {
             "starting pw stream with size={pending_size:?}, refresh={refresh:?}"
         );
 
-        make_video_params_for_initial_negotiation_macro!(params, &formats, pending_size, refresh, alpha);
+        make_video_params_for_initial_negotiation_macro!(
+            params,
+            &formats,
+            pending_size,
+            refresh,
+            alpha
+        );
         stream
             .connect(
                 Direction::Output,
@@ -1074,7 +1086,13 @@ impl Cast {
             pending_size: new_size,
         };
 
-        make_video_params_for_initial_negotiation_macro!(params, &self.formats, new_size, inner.refresh, self.offer_alpha);
+        make_video_params_for_initial_negotiation_macro!(
+            params,
+            &self.formats,
+            new_size,
+            inner.refresh,
+            self.offer_alpha
+        );
         self.stream
             .update_params(params.clone().as_mut_slice())
             .context("error updating stream params")?;
@@ -1094,7 +1112,13 @@ impl Cast {
         inner.refresh = refresh;
 
         let size = inner.state.expected_format_size();
-        make_video_params_for_initial_negotiation_macro!(params, &self.formats, size, refresh, self.offer_alpha);
+        make_video_params_for_initial_negotiation_macro!(
+            params,
+            &self.formats,
+            size,
+            refresh,
+            self.offer_alpha
+        );
         self.stream
             .update_params(params.clone().as_mut_slice())
             .context("error updating stream params")?;
@@ -1285,7 +1309,8 @@ impl Cast {
             cursor_damage_tracker,
             last_cursor_location,
             ..
-        } = &mut inner.state {
+        } = &mut inner.state
+        {
             let damage_tracker = damage_tracker
                 .get_or_insert_with(|| OutputDamageTracker::new(size, scale, Transform::Normal));
             let cursor_damage_tracker = cursor_damage_tracker.get_or_insert_with(|| {
@@ -1343,11 +1368,17 @@ impl Cast {
 
             let mut inner = self.inner.borrow_mut();
             let inner_ = &mut *inner;
-            let CastState::Ready { damage_tracker, extra_negotiation_result, alpha, .. } = &mut inner_.state else {
+            let CastState::Ready {
+                damage_tracker,
+                extra_negotiation_result,
+                alpha,
+                ..
+            } = &mut inner_.state
+            else {
                 unreachable!()
             };
             let damage_tracker = damage_tracker.as_mut().unwrap();
-            let extra_negotiation_result = extra_negotiation_result.clone();
+            let extra_negotiation_result = *extra_negotiation_result;
             let alpha = *alpha;
 
             unsafe {
@@ -1357,20 +1388,25 @@ impl Cast {
                     add_cursor_metadata(renderer, spa_buffer, cursor_data, redraw_cursor);
                 }
 
-                // FIXME: would be good to skip rendering the full frame if only the pointer changed.
-                // Unfortunately, I think the OBS PipeWire code needs to be updated first to cleanly
-                // allow for that codepath.
+                // FIXME: would be good to skip rendering the full frame if only the pointer
+                // changed. Unfortunately, I think the OBS PipeWire code needs to be
+                // updated first to cleanly allow for that codepath.
                 let fd = (*(*spa_buffer).datas).fd;
 
                 match extra_negotiation_result {
                     Some(_) => {
                         let dmabuf = inner_.dmabufs[&fd].clone();
-                        let res = render_to_dmabuf(renderer, damage_tracker, dmabuf, elements, states);
+                        let res =
+                            render_to_dmabuf(renderer, damage_tracker, dmabuf, elements, states);
                         drop(inner);
 
                         match res {
                             Ok(sync_point) => {
-                                mark_buffer_after_render(pw_buffer, &mut self.sequence_counter, SharingBuf::DMA(()));
+                                mark_buffer_after_render(
+                                    pw_buffer,
+                                    &mut self.sequence_counter,
+                                    SharingBuf::Dma(()),
+                                );
                                 trace!("queueing buffer with seq={}", self.sequence_counter);
                                 self.queue_after_sync(pw_buffer, sync_point);
                                 true
@@ -1386,7 +1422,11 @@ impl Cast {
                         let shmbuf = inner_.shmbufs[&fd].clone();
                         drop(inner);
 
-                        let fourcc = if alpha { Fourcc::Argb8888 } else { Fourcc::Xrgb8888 };
+                        let fourcc = if alpha {
+                            Fourcc::Argb8888
+                        } else {
+                            Fourcc::Xrgb8888
+                        };
 
                         match render_to_shmbuf(
                             renderer,
@@ -1398,7 +1438,11 @@ impl Cast {
                             elements.iter().rev(),
                         ) {
                             Ok(()) => {
-                                mark_buffer_after_render(pw_buffer, &mut self.sequence_counter, SharingBuf::SHM(&shmbuf));
+                                mark_buffer_after_render(
+                                    pw_buffer,
+                                    &mut self.sequence_counter,
+                                    SharingBuf::Shm(&shmbuf),
+                                );
                                 trace!("queueing buffer with seq={}", self.sequence_counter);
                                 self.queue_after_sync(pw_buffer, SyncPoint::signaled());
                                 true
@@ -1412,8 +1456,7 @@ impl Cast {
                     }
                 }
             }
-        }
-        else {
+        } else {
             error!("cast must be in Ready state to render");
             false
         }
@@ -1453,7 +1496,11 @@ impl Cast {
 
                 match clear_dmabuf(renderer, dmabuf) {
                     Ok(sync_point) => {
-                        mark_buffer_after_render(pw_buffer, &mut self.sequence_counter, SharingBuf::DMA(()));
+                        mark_buffer_after_render(
+                            pw_buffer,
+                            &mut self.sequence_counter,
+                            SharingBuf::Dma(()),
+                        );
                         trace!("queueing clear buffer with seq={}", self.sequence_counter);
                         self.queue_after_sync(pw_buffer, sync_point);
                         true
@@ -1482,8 +1529,12 @@ impl Cast {
                 let shmbuf = self.inner.borrow().shmbufs[&fd].clone();
 
                 match clear_shmbuf(&shmbuf) {
-                    Ok (()) => {
-                        mark_buffer_after_render(pw_buffer, &mut self.sequence_counter, SharingBuf::SHM(&shmbuf));
+                    Ok(()) => {
+                        mark_buffer_after_render(
+                            pw_buffer,
+                            &mut self.sequence_counter,
+                            SharingBuf::Shm(&shmbuf),
+                        );
                         trace!("queueing clear buffer with seq={}", self.sequence_counter);
                         self.queue_after_sync(pw_buffer, SyncPoint::signaled());
                         true
@@ -1498,7 +1549,6 @@ impl Cast {
                 warn!("unknown data type in dequeue_buffer_and_clear");
                 false
             }
-
         }
     }
 }
@@ -1605,8 +1655,8 @@ pub struct Shmbuf {
 }
 
 enum SharingBuf<'a> {
-    DMA (()),
-    SHM (&'a Shmbuf),
+    Dma(()),
+    Shm(&'a Shmbuf),
 }
 
 fn allocate_shmbuf(size: Size<u32, Physical>) -> anyhow::Result<Shmbuf> {
@@ -1615,26 +1665,21 @@ fn allocate_shmbuf(size: Size<u32, Physical>) -> anyhow::Result<Shmbuf> {
     let size = stride * h;
     let fd = rustix::fs::memfd_create(
         "shm_buffer",
-        rustix::fs::MemfdFlags::CLOEXEC
-        | rustix::fs::MemfdFlags::ALLOW_SEALING,
+        rustix::fs::MemfdFlags::CLOEXEC | rustix::fs::MemfdFlags::ALLOW_SEALING,
     )
-        .context("error creating memfd")?;
-    let _ = rustix::fs::ftruncate(&fd, size.try_into().unwrap())
-        .context("error set size of the fd")?;
-    let _ = rustix::fs::fcntl_add_seals(
+    .context("error creating memfd")?;
+    rustix::fs::ftruncate(&fd, size.try_into().unwrap()).context("error set size of the fd")?;
+    rustix::fs::fcntl_add_seals(
         &fd,
-        rustix::fs::SealFlags::SEAL
-        | rustix::fs::SealFlags::SHRINK
-        | rustix::fs::SealFlags::GROW,
+        rustix::fs::SealFlags::SEAL | rustix::fs::SealFlags::SHRINK | rustix::fs::SealFlags::GROW,
     )
-        .context("error sealing the fd")?;
+    .context("error sealing the fd")?;
     Ok(Shmbuf {
         fd: fd.into(),
         size,
         stride,
     })
 }
-
 
 unsafe fn return_unused_buffer(stream: &Stream, pw_buffer: NonNull<pw_buffer>) {
     // pw_stream_return_buffer() requires too new PipeWire (1.4.0). So, mark as
@@ -1654,13 +1699,17 @@ unsafe fn return_unused_buffer(stream: &Stream, pw_buffer: NonNull<pw_buffer>) {
     pw_stream_queue_buffer(stream.as_raw_ptr(), pw_buffer);
 }
 
-unsafe fn mark_buffer_after_render(pw_buffer: NonNull<pw_buffer>, sequence: &mut u64, buf: SharingBuf) {
+unsafe fn mark_buffer_after_render(
+    pw_buffer: NonNull<pw_buffer>,
+    sequence: &mut u64,
+    buf: SharingBuf,
+) {
     let pw_buffer = pw_buffer.as_ptr();
     let spa_buffer = (*pw_buffer).buffer;
     let chunk = (*(*spa_buffer).datas).chunk;
 
     match buf {
-        SharingBuf::DMA(_) => {
+        SharingBuf::Dma(_) => {
             // With DMA-BUFs, consumers should ignore the size field, and producers are allowed
             // to set it to 0.
             //
@@ -1672,13 +1721,12 @@ unsafe fn mark_buffer_after_render(pw_buffer: NonNull<pw_buffer>, sequence: &mut
             // Clear the corrupted flag we may have set before.
             (*chunk).flags = SPA_CHUNK_FLAG_NONE as i32;
         }
-        SharingBuf::SHM(shmbuf) => {
+        SharingBuf::Shm(shmbuf) => {
             (*chunk).size = 1;
             (*chunk).stride = shmbuf.stride as i32;
             (*chunk).offset = 0;
         }
     }
-
 
     *sequence = sequence.wrapping_add(1);
     if let Some(header) = find_meta_header(spa_buffer) {
@@ -1703,7 +1751,7 @@ fn render_to_shmbuf(
     fourcc: Fourcc,
     elements: impl Iterator<Item = impl RenderElement<GlesRenderer>>,
 ) -> anyhow::Result<()> {
-    let expected_size = size.w as usize * size.h as usize * SHM_BYTES_PER_PIXEL as usize;
+    let expected_size = size.w as usize * size.h as usize * SHM_BYTES_PER_PIXEL;
     ensure!(buffer.size == expected_size, "invalid buffer size");
     let mapping = render_and_download(renderer, size, scale, transform, fourcc, elements)?;
     let bytes = renderer
@@ -1713,14 +1761,14 @@ fn render_to_shmbuf(
     unsafe {
         let buf = rustix::mm::mmap(
             std::ptr::null_mut(),
-            buffer.size as usize,
+            buffer.size,
             rustix::mm::ProtFlags::READ | rustix::mm::ProtFlags::WRITE,
             rustix::mm::MapFlags::SHARED,
             buffer.fd.clone(),
             0,
         )?;
         ptr::copy_nonoverlapping(bytes.as_ptr(), buf.cast(), buffer.size);
-        let _ = rustix::mm::munmap(buf, buffer.size).unwrap();
+        rustix::mm::munmap(buf, buffer.size).unwrap();
     }
     Ok(())
 }
@@ -1869,18 +1917,18 @@ unsafe fn add_cursor_metadata(
 }
 
 fn clear_shmbuf(shmbuf: &Shmbuf) -> anyhow::Result<()> {
-    let bytes: Vec<u8> = vec![0u8; shmbuf.size];            
+    let bytes: Vec<u8> = vec![0u8; shmbuf.size];
     unsafe {
         let buf = rustix::mm::mmap(
             std::ptr::null_mut(),
-            shmbuf.size as usize,
+            shmbuf.size,
             rustix::mm::ProtFlags::READ | rustix::mm::ProtFlags::WRITE,
             rustix::mm::MapFlags::SHARED,
             shmbuf.fd.clone(),
             0,
         )?;
         ptr::copy_nonoverlapping(bytes.as_ptr(), buf.cast(), shmbuf.size);
-        let _ = rustix::mm::munmap(buf, shmbuf.size).unwrap();
+        rustix::mm::munmap(buf, shmbuf.size).unwrap();
     }
     Ok(())
 }
