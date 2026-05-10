@@ -683,7 +683,7 @@ impl<W: LayoutElement> Tile<W> {
         self.sizing_mode
     }
 
-    pub fn fullscreen_progress(&self) -> f64 {
+    pub(super) fn fullscreen_progress(&self) -> f64 {
         if let Some(resize) = &self.resize_animation {
             if let Some(anim) = &resize.fullscreen_progress {
                 return anim.clamped_value().clamp(0., 1.);

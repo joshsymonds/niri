@@ -88,8 +88,12 @@ impl FocusRing {
             self.config.inactive_gradient
         };
 
-        // Active-and-not-urgent path: lerp the resolved color through `flash_color` at the current
-        // alpha. Override the gradient with the lerped solid so the flash isn't competing with a
+        // Lerp `active_color` toward `flash_color` over the symmetric triangle-wave alpha,
+        // producing the visual path `active → flash → active`. The spec describes this as
+        // `inactive → flash → active`, but starting from `inactive` would briefly paint the
+        // newly-focused ring with the inactive color before rising to flash — visually wrong
+        // when focus has just arrived. The starting endpoint is `active` deliberately.
+        // Override the gradient with the lerped solid so the flash isn't competing with a
         // configured gradient mid-pulse — the gradient resumes once the flash settles.
         if is_active && !is_urgent {
             if let Some((flash_color, flash_alpha)) = focus_flash {

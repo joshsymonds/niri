@@ -386,11 +386,12 @@ impl<W: LayoutElement> FloatingSpace<W> {
     }
 
     pub fn active_window(&self) -> Option<&W> {
+        self.active_tile().map(Tile::window)
+    }
+
+    pub fn active_tile(&self) -> Option<&Tile<W>> {
         let id = self.active_window_id.as_ref()?;
-        self.tiles
-            .iter()
-            .find(|tile| tile.window().id() == id)
-            .map(Tile::window)
+        self.tiles.iter().find(|tile| tile.window().id() == id)
     }
 
     pub fn active_window_mut(&mut self) -> Option<&mut W> {
