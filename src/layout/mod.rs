@@ -2813,7 +2813,7 @@ impl<W: LayoutElement> Layout<W> {
                     Rectangle::new(pos_within_output.upscale(-1.), output_size(&move_.output))
                         .downscale(zoom);
 
-                move_.tile.update_render_elements(true, view_rect);
+                move_.tile.update_render_elements(true, view_rect, None);
             }
         }
 
@@ -4695,7 +4695,7 @@ impl<W: LayoutElement> Layout<W> {
                 let view_rect =
                     Rectangle::new(pos_within_output.upscale(-1.), output_size(&move_.output))
                         .downscale(zoom);
-                move_.tile.update_render_elements(false, view_rect);
+                move_.tile.update_render_elements(false, view_rect, None);
 
                 move_.tile.store_unmap_snapshot_if_empty(
                     renderer,

@@ -1221,8 +1221,16 @@ impl<W: LayoutElement> Monitor<W> {
             .as_ref()
             .and_then(|hint| hint.workspace.existing_id());
 
+        let focus_flash_alpha = self.focus_flash_alpha();
+        let focus_flash = self
+            .options
+            .layout
+            .focus_flash
+            .filter(|_| focus_flash_alpha > 0.0)
+            .map(|cfg| (cfg.flash_color, focus_flash_alpha));
+
         for (ws, geo) in self.workspaces_with_render_geo_mut(true) {
-            ws.update_render_elements(is_active);
+            ws.update_render_elements(is_active, focus_flash);
 
             if Some(ws.id()) == insert_hint_ws_id {
                 insert_hint_ws_geo = Some(geo);
