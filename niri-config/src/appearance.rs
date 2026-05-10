@@ -60,6 +60,17 @@ impl Color {
         let [r, g, b, a] = [self.r, self.g, self.b, self.a];
         [r * a, g * a, b * a, a]
     }
+
+    /// Per-channel linear interpolation in unpremultiplied space, with `t` clamped to `[0, 1]`.
+    pub fn lerp(self, other: Self, t: f32) -> Self {
+        let t = t.clamp(0., 1.);
+        Self {
+            r: self.r + (other.r - self.r) * t,
+            g: self.g + (other.g - self.g) * t,
+            b: self.b + (other.b - self.b) * t,
+            a: self.a + (other.a - self.a) * t,
+        }
+    }
 }
 
 impl Mul<f32> for Color {
@@ -1521,5 +1532,34 @@ mod tests {
         )
         "
         );
+    }
+
+    #[test]
+    fn color_lerp_endpoints() {
+        let a = Color::from_rgba8_unpremul(0, 0, 0, 255);
+        let b = Color::from_rgba8_unpremul(255, 255, 255, 255);
+        assert_eq!(a.lerp(b, 0.0), a);
+        assert_eq!(a.lerp(b, 1.0), b);
+    }
+
+    #[test]
+    fn color_lerp_midpoint() {
+        let a = Color::from_rgba8_unpremul(0, 0, 0, 255);
+        let b = Color::from_rgba8_unpremul(255, 255, 255, 255);
+        let mid = a.lerp(b, 0.5);
+        assert!((mid.r - 0.5).abs() < 1e-6);
+        assert!((mid.g - 0.5).abs() < 1e-6);
+        assert!((mid.b - 0.5).abs() < 1e-6);
+        assert!((mid.a - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn color_lerp_clamps_t() {
+        let a = Color::from_rgba8_unpremul(50, 50, 50, 255);
+        let b = Color::from_rgba8_unpremul(100, 100, 100, 255);
+        // t > 1 clamps to 1 → returns b.
+        assert_eq!(a.lerp(b, 5.0), b);
+        // t < 0 clamps to 0 → returns a.
+        assert_eq!(a.lerp(b, -5.0), a);
     }
 }

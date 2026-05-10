@@ -1,4 +1,5 @@
 use insta::assert_snapshot;
+use smithay::backend::renderer::Color32F;
 
 use super::*;
 
@@ -809,5 +810,133 @@ fn focus_flash_partial_sides_only_renders_those() {
         geo.size.w > 0.0,
         "top edge should span the output width, got {}",
         geo.size.w
+    );
+}
+
+#[track_caller]
+fn active_focus_ring_color(layout: &Layout<TestWindow>) -> Color32F {
+    let mon = layout.active_monitor_ref().expect("monitor");
+    let active_id = mon.active_window().expect("active window").id().to_owned();
+    let ws = mon.active_workspace_ref();
+    let tile = ws
+        .tiles()
+        .find(|t| t.window().id() == &active_id)
+        .expect("active tile");
+    tile.focus_ring().buffer_color()
+}
+
+#[track_caller]
+fn assert_color32f_close(actual: Color32F, expected: niri_config::Color, tag: &str) {
+    let expected: Color32F = expected.into();
+    let [ar, ag, ab, aa] = actual.components();
+    let [er, eg, eb, ea] = expected.components();
+    let eps = 1.0 / 256.0;
+    assert!(
+        (ar - er).abs() < eps
+            && (ag - eg).abs() < eps
+            && (ab - eb).abs() < eps
+            && (aa - ea).abs() < eps,
+        "{tag}: expected {expected:?}, got {actual:?}"
+    );
+}
+
+#[test]
+fn tiled_focus_flash_lerps_to_flash_color_at_peak() {
+    let mut layout = build_focus_flash_layout(
+        focus_flash_options(),
+        &[
+            Op::AddOutput(1),
+            Op::AddWindow {
+                params: TestWindowParams::new(1),
+            },
+        ],
+    );
+
+    start_flash_on_active_monitor(&mut layout);
+    // Half the pulse duration → triangle wave alpha = 1.0 (peak).
+    check_ops_on_layout(&mut layout, [Op::AdvanceAnimations { msec_delta: 50 }]);
+    layout.update_render_elements(None);
+
+    let cfg = layout.options.layout.focus_flash.unwrap();
+    assert_color32f_close(active_focus_ring_color(&layout), cfg.flash_color, "peak");
+}
+
+#[test]
+fn tiled_focus_flash_settles_back_after_pulse() {
+    let mut layout = build_focus_flash_layout(
+        focus_flash_options(),
+        &[
+            Op::AddOutput(1),
+            Op::AddWindow {
+                params: TestWindowParams::new(1),
+            },
+        ],
+    );
+
+    start_flash_on_active_monitor(&mut layout);
+    // Past the 100ms pulse — animation completes, color returns to plain active.
+    check_ops_on_layout(&mut layout, [Op::AdvanceAnimations { msec_delta: 150 }]);
+    layout.update_render_elements(None);
+
+    let active_color = niri_config::FocusRing::default().active_color;
+    assert_color32f_close(active_focus_ring_color(&layout), active_color, "post-pulse");
+}
+
+#[test]
+fn tiled_no_lerp_when_disabled() {
+    let mut layout = build_focus_flash_layout(
+        Options::default(),
+        &[
+            Op::AddOutput(1),
+            Op::AddWindow {
+                params: TestWindowParams::new(1),
+            },
+        ],
+    );
+
+    // Even with time advanced, no flash exists, so color is plain active.
+    check_ops_on_layout(&mut layout, [Op::AdvanceAnimations { msec_delta: 50 }]);
+    layout.update_render_elements(None);
+
+    let active_color = niri_config::FocusRing::default().active_color;
+    assert_color32f_close(
+        active_focus_ring_color(&layout),
+        active_color,
+        "feature off",
+    );
+}
+
+#[test]
+fn tiled_focus_flash_does_not_affect_inactive_tile() {
+    // Two windows; we'll inspect the inactive one.
+    let mut layout = build_focus_flash_layout(
+        focus_flash_options(),
+        &[
+            Op::AddOutput(1),
+            Op::AddWindow {
+                params: TestWindowParams::new(1),
+            },
+            Op::AddWindow {
+                params: TestWindowParams::new(2),
+            },
+            // Window 2 is the most recently added → active. 1 is inactive.
+        ],
+    );
+
+    start_flash_on_active_monitor(&mut layout);
+    check_ops_on_layout(&mut layout, [Op::AdvanceAnimations { msec_delta: 50 }]);
+    layout.update_render_elements(None);
+
+    let mon = layout.active_monitor_ref().expect("monitor");
+    let ws = mon.active_workspace_ref();
+    let inactive_tile = ws
+        .tiles()
+        .find(|t| *t.window().id() == 1usize)
+        .expect("window 1 tile");
+    let inactive_color = niri_config::FocusRing::default().inactive_color;
+    assert_color32f_close(
+        inactive_tile.focus_ring().buffer_color(),
+        inactive_color,
+        "inactive tile",
     );
 }
