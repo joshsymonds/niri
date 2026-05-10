@@ -1518,6 +1518,8 @@ impl<W: LayoutElement> Layout<W> {
             }
         }
 
+        let focus_flash_config = self.options.layout.focus_flash;
+
         let MonitorSet::Normal {
             monitors,
             active_monitor_idx,
@@ -1526,6 +1528,11 @@ impl<W: LayoutElement> Layout<W> {
         else {
             return;
         };
+
+        let prev_was_target = monitors
+            .get(*active_monitor_idx)
+            .and_then(|m| m.active_window())
+            .is_some_and(|w| w.id() == window);
 
         for (monitor_idx, mon) in monitors.iter_mut().enumerate() {
             for (workspace_idx, ws) in mon.workspaces.iter_mut().enumerate() {
@@ -1541,6 +1548,12 @@ impl<W: LayoutElement> Layout<W> {
                         _ => mon.switch_workspace(workspace_idx),
                     }
 
+                    if !prev_was_target {
+                        if let Some(cfg) = &focus_flash_config {
+                            mon.start_focus_flash(cfg);
+                        }
+                    }
+
                     return;
                 }
             }
@@ -1554,6 +1567,8 @@ impl<W: LayoutElement> Layout<W> {
             }
         }
 
+        let focus_flash_config = self.options.layout.focus_flash;
+
         let MonitorSet::Normal {
             monitors,
             active_monitor_idx,
@@ -1562,6 +1577,11 @@ impl<W: LayoutElement> Layout<W> {
         else {
             return;
         };
+
+        let prev_was_target = monitors
+            .get(*active_monitor_idx)
+            .and_then(|m| m.active_window())
+            .is_some_and(|w| w.id() == window);
 
         for (monitor_idx, mon) in monitors.iter_mut().enumerate() {
             for (workspace_idx, ws) in mon.workspaces.iter_mut().enumerate() {
@@ -1575,6 +1595,12 @@ impl<W: LayoutElement> Layout<W> {
                             if gesture.current_idx.floor() == workspace_idx as f64
                                 || gesture.current_idx.ceil() == workspace_idx as f64 => {}
                         _ => mon.switch_workspace(workspace_idx),
+                    }
+
+                    if !prev_was_target {
+                        if let Some(cfg) = &focus_flash_config {
+                            mon.start_focus_flash(cfg);
+                        }
                     }
 
                     return;

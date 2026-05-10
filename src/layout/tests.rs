@@ -3904,6 +3904,125 @@ prop_compose! {
     }
 }
 
+fn make_focus_flash_options() -> Options {
+    Options {
+        layout: niri_config::Layout {
+            focus_flash: Some(niri_config::FocusFlash {
+                flash_color: niri_config::Color::from_rgba8_unpremul(0xff, 0xe6, 0x80, 0xff),
+                pulse_duration_ms: 100,
+                pulses: niri_config::Pulses(1),
+                edge_width: 4,
+                sides: niri_config::FocusFlashSides::default(),
+            }),
+            ..Default::default()
+        },
+        ..Options::default()
+    }
+}
+
+#[test]
+fn focus_flash_starts_on_focus_change() {
+    let layout = check_ops_with_options(
+        make_focus_flash_options(),
+        [
+            Op::AddOutput(1),
+            Op::AddWindow {
+                params: TestWindowParams::new(1),
+            },
+            Op::AddWindow {
+                params: TestWindowParams::new(2),
+            },
+            Op::FocusWindow(1),
+        ],
+    );
+
+    let mon = layout.active_monitor_ref().expect("active monitor exists");
+    assert!(
+        mon.focus_flash_anim().is_some(),
+        "focus-flash animation should start on focus change"
+    );
+}
+
+#[test]
+fn focus_flash_does_not_start_on_noop_activation() {
+    let layout = check_ops_with_options(
+        make_focus_flash_options(),
+        [
+            Op::AddOutput(1),
+            Op::AddWindow {
+                params: TestWindowParams::new(1),
+            },
+            Op::FocusWindow(1),
+        ],
+    );
+
+    let mon = layout.active_monitor_ref().expect("active monitor exists");
+    assert!(
+        mon.focus_flash_anim().is_none(),
+        "focus-flash should not start on no-op activation"
+    );
+}
+
+#[test]
+fn focus_flash_does_not_start_when_disabled() {
+    let layout = check_ops([
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+        Op::AddWindow {
+            params: TestWindowParams::new(2),
+        },
+        Op::FocusWindow(1),
+    ]);
+
+    let mon = layout.active_monitor_ref().expect("active monitor exists");
+    assert!(
+        mon.focus_flash_anim().is_none(),
+        "focus-flash must not start when the feature is disabled"
+    );
+}
+
+#[test]
+fn focus_flash_restart_does_not_pop() {
+    let mut layout =
+        Layout::with_options(Clock::with_time(Duration::ZERO), make_focus_flash_options());
+    check_ops_on_layout(
+        &mut layout,
+        [
+            Op::AddOutput(1),
+            Op::AddWindow {
+                params: TestWindowParams::new(1),
+            },
+            Op::AddWindow {
+                params: TestWindowParams::new(2),
+            },
+            Op::FocusWindow(1),
+            Op::AdvanceAnimations { msec_delta: 25 },
+        ],
+    );
+
+    let alpha_before = layout
+        .active_monitor_ref()
+        .expect("monitor")
+        .focus_flash_alpha();
+    assert!(
+        alpha_before > 0.0,
+        "alpha should be rising mid-pulse, got {alpha_before}"
+    );
+
+    check_ops_on_layout(&mut layout, [Op::FocusWindow(2)]);
+
+    let alpha_after = layout
+        .active_monitor_ref()
+        .expect("monitor")
+        .focus_flash_alpha();
+    assert!(
+        alpha_after >= alpha_before - 1e-6,
+        "alpha popped on re-trigger: {alpha_before} → {alpha_after}"
+    );
+}
+
 proptest! {
     #![proptest_config(ProptestConfig {
         cases: if std::env::var_os("RUN_SLOW_TESTS").is_none() {

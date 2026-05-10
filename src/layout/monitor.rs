@@ -3,7 +3,7 @@ use std::iter::zip;
 use std::rc::Rc;
 use std::time::Duration;
 
-use niri_config::{CornerRadius, LayoutPart};
+use niri_config::{CornerRadius, FocusFlash, LayoutPart};
 use smithay::backend::renderer::element::utils::{
     CropRenderElement, Relocate, RelocateRenderElement, RescaleRenderElement,
 };
@@ -18,7 +18,7 @@ use super::workspace::{
     WorkspaceRenderElement,
 };
 use super::{compute_overview_zoom, ActivateWindow, HitType, LayoutElement, Options};
-use crate::animation::{Animation, Clock};
+use crate::animation::{Animation, Clock, Curve};
 use crate::input::swipe_tracker::SwipeTracker;
 use crate::niri_render_elements;
 use crate::render_helpers::renderer::NiriRenderer;
@@ -70,6 +70,11 @@ pub struct Monitor<W: LayoutElement> {
     pub(super) previous_workspace_id: Option<WorkspaceId>,
     /// In-progress switch between workspaces.
     pub(super) workspace_switch: Option<WorkspaceSwitch>,
+    /// Focus-arrival flash animation, when a `focus-flash` config is set and focus moved here.
+    ///
+    /// `Animation::value()` linearly traverses `[0.0, pulses]`; the renderer derives a
+    /// triangle-wave alpha from it (see [`Monitor::focus_flash_alpha`]).
+    focus_flash_anim: Option<Animation>,
     /// Indication where an interactively-moved window is about to be placed.
     pub(super) insert_hint: Option<InsertHint>,
     /// Insert hint element for rendering.
@@ -342,6 +347,7 @@ impl<W: LayoutElement> Monitor<W> {
             overview_open: false,
             overview_progress: None,
             workspace_switch: None,
+            focus_flash_anim: None,
             clock,
             base_options,
             options,
@@ -1035,6 +1041,12 @@ impl<W: LayoutElement> Monitor<W> {
     }
 
     pub fn advance_animations(&mut self) {
+        if let Some(anim) = &self.focus_flash_anim {
+            if anim.is_done() {
+                self.focus_flash_anim = None;
+            }
+        }
+
         match &mut self.workspace_switch {
             Some(WorkspaceSwitch::Animation(anim)) => {
                 if anim.is_done() {
@@ -1078,7 +1090,52 @@ impl<W: LayoutElement> Monitor<W> {
         self.workspace_switch
             .as_ref()
             .is_some_and(|s| s.is_animation_ongoing())
+            || self.focus_flash_anim.is_some()
             || self.workspaces.iter().any(|ws| ws.are_animations_ongoing())
+    }
+
+    /// Starts (or restarts) a focus-arrival flash on this monitor.
+    ///
+    /// On re-trigger we resume from the current animation value so the
+    /// triangle-wave alpha doesn't pop back to 0.
+    pub fn start_focus_flash(&mut self, config: &FocusFlash) {
+        let pulses = config.pulses.0 as u64;
+        if pulses == 0 || config.pulse_duration_ms == 0 {
+            return;
+        }
+
+        let duration_ms = u64::from(config.pulse_duration_ms) * pulses;
+
+        let from = self
+            .focus_flash_anim
+            .as_ref()
+            .map(|a| a.value())
+            .unwrap_or(0.0);
+        let to = from + pulses as f64;
+
+        self.focus_flash_anim = Some(Animation::ease(
+            self.clock.clone(),
+            from,
+            to,
+            0.0,
+            duration_ms,
+            Curve::Linear,
+        ));
+    }
+
+    pub fn focus_flash_anim(&self) -> Option<&Animation> {
+        self.focus_flash_anim.as_ref()
+    }
+
+    /// Current focus-flash alpha in `[0.0, 1.0]`, or `0.0` when no flash is in flight.
+    pub fn focus_flash_alpha(&self) -> f32 {
+        let Some(anim) = &self.focus_flash_anim else {
+            return 0.0;
+        };
+        let v = anim.value();
+        let frac = v - v.floor();
+        let alpha = 1.0 - (2.0 * frac - 1.0).abs();
+        (alpha as f32).clamp(0.0, 1.0)
     }
 
     pub fn are_transitions_ongoing(&self) -> bool {
