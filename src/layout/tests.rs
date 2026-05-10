@@ -3953,67 +3953,48 @@ fn make_focus_flash_options() -> Options {
     }
 }
 
+// Trigger detection (focus-actually-changed → fire) lives in
+// `niri::State::update_keyboard_focus` in `src/niri.rs`, which the layout-level
+// tests can't reach. The tests below exercise the firing API directly via
+// `Layout::start_focus_flash_on_active_monitor`, which is what the chokepoint
+// calls.
+
 #[test]
-fn focus_flash_starts_on_focus_change() {
-    let layout = check_ops_with_options(
+fn focus_flash_fires_on_active_monitor() {
+    let mut layout = check_ops_with_options(
         make_focus_flash_options(),
         [
             Op::AddOutput(1),
             Op::AddWindow {
                 params: TestWindowParams::new(1),
             },
-            Op::AddWindow {
-                params: TestWindowParams::new(2),
-            },
-            // Window 2 is the most recently added → focused. Switch to 1.
-            Op::FocusWindow(1),
         ],
     );
+
+    layout.start_focus_flash_on_active_monitor();
 
     let mon = layout.active_monitor_ref().expect("active monitor exists");
     assert!(
         mon.focus_flash_anim().is_some(),
-        "focus-flash animation should start on focus change"
+        "start_focus_flash_on_active_monitor should kick off an animation"
     );
 }
 
 #[test]
-fn focus_flash_does_not_start_on_noop_activation() {
-    let layout = check_ops_with_options(
-        make_focus_flash_options(),
-        [
-            Op::AddOutput(1),
-            Op::AddWindow {
-                params: TestWindowParams::new(1),
-            },
-            Op::FocusWindow(1),
-        ],
-    );
-
-    let mon = layout.active_monitor_ref().expect("active monitor exists");
-    assert!(
-        mon.focus_flash_anim().is_none(),
-        "focus-flash should not start on no-op activation"
-    );
-}
-
-#[test]
-fn focus_flash_does_not_start_when_disabled() {
-    let layout = check_ops([
+fn focus_flash_does_not_fire_when_disabled() {
+    let mut layout = check_ops([
         Op::AddOutput(1),
         Op::AddWindow {
             params: TestWindowParams::new(1),
         },
-        Op::AddWindow {
-            params: TestWindowParams::new(2),
-        },
-        Op::FocusWindow(1),
     ]);
+
+    layout.start_focus_flash_on_active_monitor();
 
     let mon = layout.active_monitor_ref().expect("active monitor exists");
     assert!(
         mon.focus_flash_anim().is_none(),
-        "focus-flash must not start when the feature is disabled"
+        "no focus_flash config → no animation"
     );
 }
 
@@ -4028,13 +4009,11 @@ fn focus_flash_restart_does_not_pop() {
             Op::AddWindow {
                 params: TestWindowParams::new(1),
             },
-            Op::AddWindow {
-                params: TestWindowParams::new(2),
-            },
-            Op::FocusWindow(1),
-            Op::AdvanceAnimations { msec_delta: 25 },
         ],
     );
+
+    layout.start_focus_flash_on_active_monitor();
+    check_ops_on_layout(&mut layout, [Op::AdvanceAnimations { msec_delta: 25 }]);
 
     let alpha_before = layout
         .active_monitor_ref()
@@ -4045,7 +4024,7 @@ fn focus_flash_restart_does_not_pop() {
         "alpha should be rising mid-pulse, got {alpha_before}"
     );
 
-    check_ops_on_layout(&mut layout, [Op::FocusWindow(2)]);
+    layout.start_focus_flash_on_active_monitor();
 
     let alpha_after = layout
         .active_monitor_ref()
