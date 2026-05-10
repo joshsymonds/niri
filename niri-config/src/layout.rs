@@ -2,7 +2,7 @@ use knuffel::errors::DecodeError;
 use niri_ipc::{ColumnDisplay, SizeChange};
 
 use crate::appearance::{
-    Border, FocusRing, InsertHint, Shadow, TabIndicator, DEFAULT_BACKGROUND_COLOR,
+    Border, FocusFlash, FocusRing, InsertHint, Shadow, TabIndicator, DEFAULT_BACKGROUND_COLOR,
 };
 use crate::utils::{expect_only_children, Flag, MergeWith};
 use crate::{BorderRule, Color, FloatOrInt, InsertHintPart, ShadowRule, TabIndicatorPart};
@@ -14,6 +14,7 @@ pub struct Layout {
     pub shadow: Shadow,
     pub tab_indicator: TabIndicator,
     pub insert_hint: InsertHint,
+    pub focus_flash: Option<FocusFlash>,
     pub preset_column_widths: Vec<PresetSize>,
     pub default_column_width: Option<PresetSize>,
     pub preset_window_heights: Vec<PresetSize>,
@@ -34,6 +35,7 @@ impl Default for Layout {
             shadow: Shadow::default(),
             tab_indicator: TabIndicator::default(),
             insert_hint: InsertHint::default(),
+            focus_flash: None,
             preset_column_widths: vec![
                 PresetSize::Proportion(1. / 3.),
                 PresetSize::Proportion(0.5),
@@ -80,6 +82,10 @@ impl MergeWith<LayoutPart> for Layout {
             background_color,
         );
 
+        if let Some(x) = &part.focus_flash {
+            self.focus_flash = Some(*x);
+        }
+
         if let Some(x) = part.default_column_width {
             self.default_column_width = x.0;
         }
@@ -106,6 +112,8 @@ pub struct LayoutPart {
     pub tab_indicator: Option<TabIndicatorPart>,
     #[knuffel(child)]
     pub insert_hint: Option<InsertHintPart>,
+    #[knuffel(child)]
+    pub focus_flash: Option<FocusFlash>,
     #[knuffel(child, unwrap(children))]
     pub preset_column_widths: Option<Vec<PresetSize>>,
     #[knuffel(child)]
