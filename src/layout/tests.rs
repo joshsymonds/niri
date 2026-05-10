@@ -3878,6 +3878,37 @@ prop_compose! {
 }
 
 prop_compose! {
+    fn arbitrary_focus_flash()(
+        pulse_duration_ms in 1u32..=1000,
+        pulses in 1u8..=5,
+        edge_width in 0u16..=64,
+        top in any::<bool>(),
+        bottom in any::<bool>(),
+        left in any::<bool>(),
+        right in any::<bool>(),
+    ) -> niri_config::FocusFlash {
+        // Validator requires at least one side; default to `top` if all four were false.
+        let (top, bottom, left, right) = if !(top || bottom || left || right) {
+            (true, false, false, false)
+        } else {
+            (top, bottom, left, right)
+        };
+        niri_config::FocusFlash {
+            flash_color: niri_config::Color::from_rgba8_unpremul(0xff, 0xe6, 0x80, 0xff),
+            pulse_duration_ms,
+            pulses: niri_config::Pulses(pulses),
+            edge_width,
+            sides: niri_config::FocusFlashSides {
+                top,
+                bottom,
+                left,
+                right,
+            },
+        }
+    }
+}
+
+prop_compose! {
     fn arbitrary_layout_part()(
         gaps in prop::option::of(arbitrary_spacing().prop_map(FloatOrInt)),
         struts in prop::option::of(arbitrary_struts()),
@@ -3885,6 +3916,7 @@ prop_compose! {
         border in prop::option::of(arbitrary_border()),
         shadow in prop::option::of(arbitrary_shadow()),
         tab_indicator in prop::option::of(arbitrary_tab_indicator()),
+        focus_flash in prop::option::of(arbitrary_focus_flash()),
         center_focused_column in prop::option::of(arbitrary_center_focused_column()),
         always_center_single_column in prop::option::of(any::<bool>().prop_map(Flag)),
         empty_workspace_above_first in prop::option::of(any::<bool>().prop_map(Flag)),
@@ -3899,6 +3931,7 @@ prop_compose! {
             border,
             shadow,
             tab_indicator,
+            focus_flash,
             ..Default::default()
         }
     }
