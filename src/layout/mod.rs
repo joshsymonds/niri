@@ -364,6 +364,11 @@ pub struct Layout<W: LayoutElement> {
     overview_open: bool,
     /// The overview zoom progress.
     overview_progress: Option<OverviewProgress>,
+    /// Last-observed globally-focused window id, snapshot at the top of every
+    /// `update_render_elements` call. Used to detect focus changes for the focus-flash
+    /// feature regardless of which path (activate_window, focus_left/right/up/down,
+    /// workspace switches, etc.) caused them.
+    last_focused_window_id: Option<W::Id>,
     /// Configurable properties of the layout.
     options: Rc<Options>,
 }
@@ -703,6 +708,7 @@ impl<W: LayoutElement> Layout<W> {
             update_render_elements_time: Duration::ZERO,
             overview_open: false,
             overview_progress: None,
+            last_focused_window_id: None,
             options: Rc::new(options),
         }
     }
@@ -728,6 +734,7 @@ impl<W: LayoutElement> Layout<W> {
             update_render_elements_time: Duration::ZERO,
             overview_open: false,
             overview_progress: None,
+            last_focused_window_id: None,
             options: opts,
         }
     }
@@ -1530,8 +1537,6 @@ impl<W: LayoutElement> Layout<W> {
             }
         }
 
-        let focus_flash_config = self.options.layout.focus_flash;
-
         let MonitorSet::Normal {
             monitors,
             active_monitor_idx,
@@ -1540,14 +1545,6 @@ impl<W: LayoutElement> Layout<W> {
         else {
             return;
         };
-
-        // Currently-focused-window check assumes global focus == the active monitor's
-        // active workspace's active window. That holds in the existing codebase; if a
-        // future refactor breaks it, this no-op gate breaks too.
-        let prev_was_target = monitors
-            .get(*active_monitor_idx)
-            .and_then(|m| m.active_window())
-            .is_some_and(|w| w.id() == window);
 
         for (monitor_idx, mon) in monitors.iter_mut().enumerate() {
             for (workspace_idx, ws) in mon.workspaces.iter_mut().enumerate() {
@@ -1563,15 +1560,56 @@ impl<W: LayoutElement> Layout<W> {
                         _ => mon.switch_workspace(workspace_idx),
                     }
 
-                    if !prev_was_target {
-                        if let Some(cfg) = &focus_flash_config {
-                            mon.start_focus_flash(cfg);
-                        }
-                    }
-
                     return;
                 }
             }
+        }
+    }
+
+    /// Returns the globally-focused window's id, walking active monitor → active
+    /// workspace → active window.
+    fn focused_window_id(&self) -> Option<W::Id> {
+        let MonitorSet::Normal {
+            monitors,
+            active_monitor_idx,
+            ..
+        } = &self.monitor_set
+        else {
+            return None;
+        };
+        monitors
+            .get(*active_monitor_idx)
+            .and_then(|m| m.active_window())
+            .map(|w| w.id().clone())
+    }
+
+    /// Detects focus changes and kicks off the focus-flash on the destination monitor.
+    ///
+    /// Polled every frame from `update_render_elements`. This lives at the frame
+    /// boundary rather than inside each focus-changing method (`activate_window`,
+    /// `focus_left/right/up/down`, workspace-switch landing, etc.) because there are
+    /// roughly fifteen entry points and a polling design at the chokepoint catches
+    /// every path uniformly. The `last_focused_window_id == None` guard ensures the
+    /// first call after construction is treated as a baseline, not a change.
+    fn poll_focus_change_for_flash(&mut self) {
+        let new_focus = self.focused_window_id();
+        let prev_focus = std::mem::replace(&mut self.last_focused_window_id, new_focus.clone());
+        if prev_focus.is_none() || prev_focus == new_focus {
+            return;
+        }
+        let Some(cfg) = self.options.layout.focus_flash else {
+            return;
+        };
+        let MonitorSet::Normal {
+            monitors,
+            active_monitor_idx,
+            ..
+        } = &mut self.monitor_set
+        else {
+            return;
+        };
+        if let Some(mon) = monitors.get_mut(*active_monitor_idx) {
+            mon.start_focus_flash(&cfg);
         }
     }
 
@@ -2762,6 +2800,10 @@ impl<W: LayoutElement> Layout<W> {
         let _span = tracy_client::span!("Layout::update_render_elements");
 
         self.update_render_elements_time = self.clock.now();
+
+        // Detect focus changes from any path (activate_window, focus_left/right/up/down,
+        // workspace switches, etc.) and kick off the focus-flash if focus actually moved.
+        self.poll_focus_change_for_flash();
 
         let zoom = self.overview_zoom();
         if let Some(InteractiveMoveState::Moving(move_)) = &mut self.interactive_move {
