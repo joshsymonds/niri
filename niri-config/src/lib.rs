@@ -631,6 +631,8 @@ impl ConfigPath {
 
 #[cfg(test)]
 mod tests {
+    use std::str::FromStr;
+
     use insta::{assert_debug_snapshot, assert_snapshot};
     use pretty_assertions::assert_eq;
 
@@ -1415,6 +1417,7 @@ mod tests {
                         },
                     ),
                 },
+                focus_flash: None,
                 preset_column_widths: [
                     Proportion(
                         0.25,
@@ -2465,6 +2468,129 @@ mod tests {
         -                0.6666666666666666,
         +                0.66667,
         "#,
+        );
+    }
+
+    #[test]
+    fn parse_focus_flash_minimal() {
+        let parsed = do_parse(
+            r##"
+            layout {
+                focus-flash {
+                    flash-color "#ffe680"
+                }
+            }
+            "##,
+        );
+        let flash = parsed
+            .layout
+            .focus_flash
+            .expect("focus_flash should be Some");
+        assert_eq!(flash.flash_color, Color::from_str("#ffe680").unwrap());
+        assert_eq!(flash.pulse_duration_ms, 200);
+        assert_eq!(flash.pulses, Pulses(1));
+        assert_eq!(flash.edge_width, 4);
+        assert_eq!(
+            flash.sides,
+            FocusFlashSides {
+                top: true,
+                bottom: true,
+                left: true,
+                right: true,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_focus_flash_full() {
+        let parsed = do_parse(
+            r##"
+            layout {
+                focus-flash {
+                    flash-color "#ffe680"
+                    pulse-duration-ms 350
+                    pulses 3
+                    edge-width 8
+                    sides "left" "right"
+                }
+            }
+            "##,
+        );
+        let flash = parsed
+            .layout
+            .focus_flash
+            .expect("focus_flash should be Some");
+        assert_eq!(flash.pulse_duration_ms, 350);
+        assert_eq!(flash.pulses, Pulses(3));
+        assert_eq!(flash.edge_width, 8);
+        assert_eq!(
+            flash.sides,
+            FocusFlashSides {
+                top: false,
+                bottom: false,
+                left: true,
+                right: true,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_focus_flash_absent() {
+        let parsed = do_parse("");
+        assert_eq!(parsed.layout.focus_flash, None);
+    }
+
+    #[track_caller]
+    fn parse_focus_flash_err(body: &str) -> String {
+        let layout = format!("layout {{\nfocus-flash {{\n{body}\n}}\n}}\n");
+        let err = Config::parse_mem(&layout)
+            .map(|_| ())
+            .expect_err("expected a parse error");
+        format!("{:?}", miette::Report::new(err))
+    }
+
+    #[test]
+    fn parse_focus_flash_pulses_too_high() {
+        let err = parse_focus_flash_err("flash-color \"#ffe680\"\npulses 6");
+        assert!(
+            err.contains("pulses must be between 1 and 5"),
+            "expected range error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_focus_flash_pulses_zero() {
+        let err = parse_focus_flash_err("flash-color \"#ffe680\"\npulses 0");
+        assert!(
+            err.contains("pulses must be between 1 and 5"),
+            "expected range error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_focus_flash_unknown_side() {
+        let err = parse_focus_flash_err("flash-color \"#ffe680\"\nsides \"diagonal\"");
+        assert!(
+            err.contains("unknown side") || err.contains("diagonal"),
+            "expected unknown-side error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_focus_flash_empty_sides() {
+        let err = parse_focus_flash_err("flash-color \"#ffe680\"\nsides");
+        assert!(
+            err.contains("at least one side"),
+            "expected non-empty-sides error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_focus_flash_missing_color() {
+        let err = parse_focus_flash_err("pulses 2");
+        assert!(
+            err.contains("flash-color") || err.contains("flash_color"),
+            "expected missing flash-color error, got: {err}"
         );
     }
 }
