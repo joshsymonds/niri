@@ -657,3 +657,157 @@ fn removing_only_fullscreen_tile_updates_view_offset() {
     // FIXME: currently, removing a tile doesn't cause the view offset to update.
     assert_snapshot!(layout.active_workspace().unwrap().scrolling().view_pos(), @"0");
 }
+
+fn focus_flash_options() -> Options {
+    Options {
+        layout: niri_config::Layout {
+            focus_flash: Some(niri_config::FocusFlash {
+                flash_color: niri_config::Color::from_rgba8_unpremul(0xff, 0xe6, 0x80, 0xff),
+                pulse_duration_ms: 100,
+                pulses: niri_config::Pulses(1),
+                edge_width: 4,
+                sides: niri_config::FocusFlashSides::default(),
+            }),
+            ..Default::default()
+        },
+        ..Options::default()
+    }
+}
+
+#[track_caller]
+fn build_focus_flash_layout(options: Options, ops: &[Op]) -> Layout<TestWindow> {
+    let mut layout = Layout::with_options(Clock::with_time(Duration::ZERO), options.clone());
+    check_ops_on_layout(&mut layout, ops.iter().cloned());
+    layout
+}
+
+#[track_caller]
+fn start_flash_on_active_monitor(layout: &mut Layout<TestWindow>) {
+    let cfg = layout
+        .options
+        .layout
+        .focus_flash
+        .expect("focus_flash must be configured");
+    let mon = layout.monitors_mut().next().expect("monitor exists");
+    mon.start_focus_flash(&cfg);
+}
+
+#[test]
+fn focus_flash_renders_when_fullscreen() {
+    let mut layout = build_focus_flash_layout(
+        focus_flash_options(),
+        &[
+            Op::AddOutput(1),
+            Op::AddWindow {
+                params: TestWindowParams::new(1),
+            },
+            Op::FullscreenWindow(1),
+            Op::Communicate(1),
+            Op::CompleteAnimations,
+        ],
+    );
+
+    start_flash_on_active_monitor(&mut layout);
+    check_ops_on_layout(&mut layout, [Op::AdvanceAnimations { msec_delta: 25 }]);
+
+    let mon = layout.active_monitor_ref().expect("monitor");
+    let elements = mon.focus_flash_render_elements();
+    assert_eq!(
+        elements.len(),
+        4,
+        "expected 4 edge-frame elements (top/bottom/left/right), got {}",
+        elements.len()
+    );
+}
+
+#[test]
+fn focus_flash_skipped_when_not_fullscreen() {
+    let mut layout = build_focus_flash_layout(
+        focus_flash_options(),
+        &[
+            Op::AddOutput(1),
+            Op::AddWindow {
+                params: TestWindowParams::new(1),
+            },
+        ],
+    );
+
+    // Window is tiled (not fullscreen). Even with the flash in flight, the edge
+    // frame must not render — the tiled focus-ring path will carry the flash later.
+    start_flash_on_active_monitor(&mut layout);
+    check_ops_on_layout(&mut layout, [Op::AdvanceAnimations { msec_delta: 25 }]);
+
+    let mon = layout.active_monitor_ref().expect("monitor");
+    assert!(
+        mon.focus_flash_render_elements().is_empty(),
+        "edge-frame must not render for tiled focus changes"
+    );
+}
+
+#[test]
+fn focus_flash_skipped_when_alpha_zero() {
+    let layout = build_focus_flash_layout(
+        focus_flash_options(),
+        &[
+            Op::AddOutput(1),
+            Op::AddWindow {
+                params: TestWindowParams::new(1),
+            },
+            Op::FullscreenWindow(1),
+            Op::Communicate(1),
+            Op::CompleteAnimations,
+        ],
+    );
+
+    let mon = layout.active_monitor_ref().expect("monitor");
+    assert!(
+        mon.focus_flash_render_elements().is_empty(),
+        "edge-frame must not render when no flash is in flight"
+    );
+}
+
+#[test]
+fn focus_flash_partial_sides_only_renders_those() {
+    let mut options = focus_flash_options();
+    options.layout.focus_flash.as_mut().unwrap().sides = niri_config::FocusFlashSides {
+        top: true,
+        bottom: false,
+        left: false,
+        right: false,
+    };
+
+    let mut layout = build_focus_flash_layout(
+        options,
+        &[
+            Op::AddOutput(1),
+            Op::AddWindow {
+                params: TestWindowParams::new(1),
+            },
+            Op::FullscreenWindow(1),
+            Op::Communicate(1),
+            Op::CompleteAnimations,
+        ],
+    );
+
+    start_flash_on_active_monitor(&mut layout);
+    check_ops_on_layout(&mut layout, [Op::AdvanceAnimations { msec_delta: 25 }]);
+
+    let mon = layout.active_monitor_ref().expect("monitor");
+    let elements = mon.focus_flash_render_elements();
+    assert_eq!(
+        elements.len(),
+        1,
+        "only the `top` side should render, got {}",
+        elements.len()
+    );
+
+    let geo = elements[0].geo();
+    assert_eq!(geo.loc.x, 0.0);
+    assert_eq!(geo.loc.y, 0.0);
+    assert_eq!(geo.size.h, 4.0, "edge-width should be 4");
+    assert!(
+        geo.size.w > 0.0,
+        "top edge should span the output width, got {}",
+        geo.size.w
+    );
+}
