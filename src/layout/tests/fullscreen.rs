@@ -689,8 +689,14 @@ fn start_flash_on_active_monitor(layout: &mut Layout<TestWindow>) {
         .layout
         .focus_flash
         .expect("focus_flash must be configured");
-    let mon = layout.monitors_mut().next().expect("monitor exists");
-    mon.start_focus_flash(&cfg);
+    {
+        let mon = layout.monitors_mut().next().expect("monitor exists");
+        mon.start_focus_flash(&cfg);
+    }
+    // Production calls `update_render_elements` every frame; that's where the persistent
+    // edge buffers get sized. The tests don't drive a full render loop, so refresh once
+    // here to mirror the lifecycle.
+    layout.update_render_elements(None);
 }
 
 #[test]
@@ -938,5 +944,35 @@ fn tiled_focus_flash_does_not_affect_inactive_tile() {
         inactive_tile.focus_ring().buffer_color(),
         inactive_color,
         "inactive tile",
+    );
+}
+
+#[test]
+fn tiled_focus_flash_alpha_correct_across_pulse_boundary() {
+    // pulses=3, pulse-duration=100 → total 300 ms. Peaks at t=50, 150, 250 ms.
+    // Verify the second-pulse peak is reached, which exercises the fractional-value
+    // wrap (frac = value - value.floor()) across pulse boundaries.
+    let mut options = focus_flash_options();
+    options.layout.focus_flash.as_mut().unwrap().pulses = niri_config::Pulses(3);
+
+    let mut layout = build_focus_flash_layout(
+        options,
+        &[
+            Op::AddOutput(1),
+            Op::AddWindow {
+                params: TestWindowParams::new(1),
+            },
+        ],
+    );
+
+    start_flash_on_active_monitor(&mut layout);
+    check_ops_on_layout(&mut layout, [Op::AdvanceAnimations { msec_delta: 150 }]);
+    layout.update_render_elements(None);
+
+    let cfg = layout.options.layout.focus_flash.unwrap();
+    assert_color32f_close(
+        active_focus_ring_color(&layout),
+        cfg.flash_color,
+        "second-pulse peak",
     );
 }

@@ -483,6 +483,14 @@ impl<W: LayoutElement> Workspace<W> {
         }
     }
 
+    pub fn active_tile(&self) -> Option<&Tile<W>> {
+        if self.floating_is_active.get() {
+            self.floating.active_tile()
+        } else {
+            self.scrolling.active_tile()
+        }
+    }
+
     pub fn active_window_mut(&mut self) -> Option<&mut W> {
         if self.floating_is_active.get() {
             self.floating.active_window_mut()

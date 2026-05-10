@@ -76,6 +76,11 @@ pub struct Monitor<W: LayoutElement> {
     /// `Animation::value()` linearly traverses `[0.0, pulses]`; the renderer derives a
     /// triangle-wave alpha from it (see [`Monitor::focus_flash_alpha`]).
     focus_flash_anim: Option<Animation>,
+    /// Persistent buffers for the fullscreen-path focus-flash edge frame.
+    ///
+    /// Indexed `[top, bottom, left, right]`. Reused across frames so the damage tracker
+    /// sees stable element ids; only `commit` advances when size or color changes.
+    focus_flash_buffers: [SolidColorBuffer; 4],
     /// Indication where an interactively-moved window is about to be placed.
     pub(super) insert_hint: Option<InsertHint>,
     /// Insert hint element for rendering.
@@ -349,6 +354,7 @@ impl<W: LayoutElement> Monitor<W> {
             overview_progress: None,
             workspace_switch: None,
             focus_flash_anim: None,
+            focus_flash_buffers: Default::default(),
             clock,
             base_options,
             options,
@@ -1097,22 +1103,28 @@ impl<W: LayoutElement> Monitor<W> {
 
     /// Starts (or restarts) a focus-arrival flash on this monitor.
     ///
-    /// On re-trigger we resume from the current animation value so the
-    /// triangle-wave alpha doesn't pop back to 0.
+    /// On re-trigger the new animation begins at the previous animation's current
+    /// `value()`, so the derived alpha is continuous through the handoff. The animation
+    /// always ends at an integer `value()` — i.e., on a triangle-wave trough where
+    /// `alpha == 0` — so when `is_done()` clears the animation no end-of-pulse pop
+    /// occurs from a non-zero alpha to 0.
     pub fn start_focus_flash(&mut self, config: &FocusFlash) {
-        let pulses = config.pulses.0 as u64;
+        let pulses = config.pulses.0;
         if pulses == 0 || config.pulse_duration_ms == 0 {
             return;
         }
-
-        let duration_ms = u64::from(config.pulse_duration_ms) * pulses;
 
         let from = self
             .focus_flash_anim
             .as_ref()
             .map(|a| a.value())
             .unwrap_or(0.0);
-        let to = from + pulses as f64;
+        // Ceil to the next integer so the animation lands on a triangle-wave trough.
+        let to = (from + f64::from(pulses)).ceil();
+        let duration_ms = ((to - from) * f64::from(config.pulse_duration_ms)).round() as u64;
+        if duration_ms == 0 {
+            return;
+        }
 
         self.focus_flash_anim = Some(Animation::ease(
             self.clock.clone(),
@@ -1145,6 +1157,10 @@ impl<W: LayoutElement> Monitor<W> {
     /// is not in steady-state fullscreen — in transitional fullscreen states the
     /// focus-ring/border path will eventually carry the flash, so we don't render
     /// an edge frame on top of it.
+    ///
+    /// The four edge buffers are persistent (`focus_flash_buffers`); their size and
+    /// color are refreshed by `update_render_elements` so the damage tracker only sees
+    /// commit bumps when geometry or `flash_color` actually change.
     pub fn focus_flash_render_elements(&self) -> Vec<SolidColorRenderElement> {
         let alpha = self.focus_flash_alpha();
         if alpha <= 0.0 {
@@ -1155,11 +1171,7 @@ impl<W: LayoutElement> Monitor<W> {
         };
 
         let ws = &self.workspaces[self.active_workspace_idx];
-        let Some(active_window) = ws.active_window() else {
-            return Vec::new();
-        };
-        let active_id = active_window.id();
-        let Some(tile) = ws.tiles().find(|t| t.window().id() == active_id) else {
+        let Some(tile) = ws.active_tile() else {
             return Vec::new();
         };
         if tile.fullscreen_progress() < 1.0 {
@@ -1173,37 +1185,56 @@ impl<W: LayoutElement> Monitor<W> {
             return Vec::new();
         }
 
+        let locations = [
+            Point::from((0.0, 0.0)),           // top
+            Point::from((0.0, view_h - edge)), // bottom
+            Point::from((0.0, 0.0)),           // left
+            Point::from((view_w - edge, 0.0)), // right
+        ];
+        let enabled = [
+            cfg.sides.top,
+            cfg.sides.bottom,
+            cfg.sides.left,
+            cfg.sides.right,
+        ];
+
         let mut out = Vec::with_capacity(4);
-        let mut emit = |loc: Point<f64, Logical>, size: Size<f64, Logical>| {
-            let buf = SolidColorBuffer::new(size, cfg.flash_color);
+        for ((buf, &loc), &on) in zip(zip(&self.focus_flash_buffers, &locations), &enabled) {
+            if !on {
+                continue;
+            }
             out.push(SolidColorRenderElement::from_buffer(
-                &buf,
+                buf,
                 loc,
                 alpha,
                 Kind::Unspecified,
             ));
-        };
-
-        if cfg.sides.top {
-            emit(Point::from((0.0, 0.0)), Size::from((view_w, edge)));
-        }
-        if cfg.sides.bottom {
-            emit(
-                Point::from((0.0, view_h - edge)),
-                Size::from((view_w, edge)),
-            );
-        }
-        if cfg.sides.left {
-            emit(Point::from((0.0, 0.0)), Size::from((edge, view_h)));
-        }
-        if cfg.sides.right {
-            emit(
-                Point::from((view_w - edge, 0.0)),
-                Size::from((edge, view_h)),
-            );
         }
 
         out
+    }
+
+    /// Refresh the four persistent focus-flash edge buffers from current view size and
+    /// `flash_color`. `SolidColorBuffer::update` only bumps `commit` when values change,
+    /// so frames where neither geometry nor color moved are cost-free here.
+    fn update_focus_flash_buffers(&mut self) {
+        let Some(cfg) = self.options.layout.focus_flash else {
+            return;
+        };
+        let view_w = self.view_size.w;
+        let view_h = self.view_size.h;
+        let edge = f64::from(cfg.edge_width);
+
+        let sizes = [
+            Size::from((view_w, edge)), // top
+            Size::from((view_w, edge)), // bottom
+            Size::from((edge, view_h)), // left
+            Size::from((edge, view_h)), // right
+        ];
+
+        for (buf, size) in zip(&mut self.focus_flash_buffers, sizes) {
+            buf.update(size, cfg.flash_color);
+        }
     }
 
     pub fn are_transitions_ongoing(&self) -> bool {
@@ -1221,6 +1252,8 @@ impl<W: LayoutElement> Monitor<W> {
             .as_ref()
             .and_then(|hint| hint.workspace.existing_id());
 
+        self.update_focus_flash_buffers();
+
         let focus_flash_alpha = self.focus_flash_alpha();
         let focus_flash = self
             .options
@@ -1229,6 +1262,9 @@ impl<W: LayoutElement> Monitor<W> {
             .filter(|_| focus_flash_alpha > 0.0)
             .map(|cfg| (cfg.flash_color, focus_flash_alpha));
 
+        // Broadcast to every workspace: during a workspace-switch animation both source
+        // and destination are visible, and the destination's tile must already be
+        // flashing when it scrolls in. Per-tile `is_active` gates the lerp downstream.
         for (ws, geo) in self.workspaces_with_render_geo_mut(true) {
             ws.update_render_elements(is_active, focus_flash);
 

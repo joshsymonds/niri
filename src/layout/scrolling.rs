@@ -452,6 +452,15 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         Some(&mut col.tiles[col.active_tile_idx])
     }
 
+    pub fn active_tile(&self) -> Option<&Tile<W>> {
+        if self.columns.is_empty() {
+            return None;
+        }
+
+        let col = &self.columns[self.active_column_idx];
+        Some(&col.tiles[col.active_tile_idx])
+    }
+
     pub fn is_active_pending_fullscreen(&self) -> bool {
         if self.columns.is_empty() {
             return false;
