@@ -3955,7 +3955,7 @@ fn make_focus_flash_options() -> Options {
 
 #[test]
 fn focus_flash_starts_on_focus_change() {
-    let mut layout = check_ops_with_options(
+    let layout = check_ops_with_options(
         make_focus_flash_options(),
         [
             Op::AddOutput(1),
@@ -3965,13 +3965,10 @@ fn focus_flash_starts_on_focus_change() {
             Op::AddWindow {
                 params: TestWindowParams::new(2),
             },
+            // Window 2 is the most recently added → focused. Switch to 1.
+            Op::FocusWindow(1),
         ],
     );
-    // Establish baseline focus, then change it. The poll fires only on actual changes,
-    // and only after `update_render_elements` runs.
-    layout.update_render_elements(None);
-    check_ops_on_layout(&mut layout, [Op::FocusWindow(1)]);
-    layout.update_render_elements(None);
 
     let mon = layout.active_monitor_ref().expect("active monitor exists");
     assert!(
@@ -3982,18 +3979,16 @@ fn focus_flash_starts_on_focus_change() {
 
 #[test]
 fn focus_flash_does_not_start_on_noop_activation() {
-    let mut layout = check_ops_with_options(
+    let layout = check_ops_with_options(
         make_focus_flash_options(),
         [
             Op::AddOutput(1),
             Op::AddWindow {
                 params: TestWindowParams::new(1),
             },
+            Op::FocusWindow(1),
         ],
     );
-    layout.update_render_elements(None);
-    check_ops_on_layout(&mut layout, [Op::FocusWindow(1)]);
-    layout.update_render_elements(None);
 
     let mon = layout.active_monitor_ref().expect("active monitor exists");
     assert!(
@@ -4004,7 +3999,7 @@ fn focus_flash_does_not_start_on_noop_activation() {
 
 #[test]
 fn focus_flash_does_not_start_when_disabled() {
-    let mut layout = check_ops([
+    let layout = check_ops([
         Op::AddOutput(1),
         Op::AddWindow {
             params: TestWindowParams::new(1),
@@ -4012,10 +4007,8 @@ fn focus_flash_does_not_start_when_disabled() {
         Op::AddWindow {
             params: TestWindowParams::new(2),
         },
+        Op::FocusWindow(1),
     ]);
-    layout.update_render_elements(None);
-    check_ops_on_layout(&mut layout, [Op::FocusWindow(1)]);
-    layout.update_render_elements(None);
 
     let mon = layout.active_monitor_ref().expect("active monitor exists");
     assert!(
@@ -4038,12 +4031,10 @@ fn focus_flash_restart_does_not_pop() {
             Op::AddWindow {
                 params: TestWindowParams::new(2),
             },
+            Op::FocusWindow(1),
+            Op::AdvanceAnimations { msec_delta: 25 },
         ],
     );
-    layout.update_render_elements(None);
-    check_ops_on_layout(&mut layout, [Op::FocusWindow(1)]);
-    layout.update_render_elements(None);
-    check_ops_on_layout(&mut layout, [Op::AdvanceAnimations { msec_delta: 25 }]);
 
     let alpha_before = layout
         .active_monitor_ref()
@@ -4055,7 +4046,6 @@ fn focus_flash_restart_does_not_pop() {
     );
 
     check_ops_on_layout(&mut layout, [Op::FocusWindow(2)]);
-    layout.update_render_elements(None);
 
     let alpha_after = layout
         .active_monitor_ref()
