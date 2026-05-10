@@ -1530,20 +1530,17 @@ impl<W: LayoutElement> Layout<W> {
             }
         }
 
-        let prev_focus = self.focused_window_id();
-
-        let activated = {
+        self.with_focus_flash_check(|this| {
             let MonitorSet::Normal {
                 monitors,
                 active_monitor_idx,
                 ..
-            } = &mut self.monitor_set
+            } = &mut this.monitor_set
             else {
                 return;
             };
 
-            let mut activated = false;
-            'outer: for (monitor_idx, mon) in monitors.iter_mut().enumerate() {
+            for (monitor_idx, mon) in monitors.iter_mut().enumerate() {
                 for (workspace_idx, ws) in mon.workspaces.iter_mut().enumerate() {
                     if activate(ws, window) {
                         *active_monitor_idx = monitor_idx;
@@ -1557,17 +1554,11 @@ impl<W: LayoutElement> Layout<W> {
                             _ => mon.switch_workspace(workspace_idx),
                         }
 
-                        activated = true;
-                        break 'outer;
+                        return;
                     }
                 }
             }
-            activated
-        };
-
-        if activated {
-            self.maybe_fire_focus_flash(prev_focus);
-        }
+        });
     }
 
     /// Returns the globally-focused window's id, walking active monitor → active
@@ -1585,6 +1576,18 @@ impl<W: LayoutElement> Layout<W> {
             .get(*active_monitor_idx)
             .and_then(|m| m.active_window())
             .map(|w| w.id().clone())
+    }
+
+    /// Wraps a body that may change focus, snapshotting the focused window before
+    /// and firing `maybe_fire_focus_flash` after. Used by the public focus methods
+    /// on `Layout` (`focus_left`, `focus_right`, `switch_workspace_*`, etc.) so the
+    /// before/after pattern lives in one place rather than being stamped at every
+    /// call site.
+    fn with_focus_flash_check<R>(&mut self, body: impl FnOnce(&mut Self) -> R) -> R {
+        let prev_focus = self.focused_window_id();
+        let result = body(self);
+        self.maybe_fire_focus_flash(prev_focus);
+        result
     }
 
     /// Fires the focus-flash on the active monitor when the globally-focused
@@ -1949,70 +1952,71 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn focus_left(&mut self) {
-        let prev_focus = self.focused_window_id();
-        if let Some(workspace) = self.active_workspace_mut() {
-            workspace.focus_left();
-        }
-        self.maybe_fire_focus_flash(prev_focus);
+        self.with_focus_flash_check(|this| {
+            if let Some(workspace) = this.active_workspace_mut() {
+                workspace.focus_left();
+            }
+        });
     }
 
     pub fn focus_right(&mut self) {
-        let prev_focus = self.focused_window_id();
-        if let Some(workspace) = self.active_workspace_mut() {
-            workspace.focus_right();
-        }
-        self.maybe_fire_focus_flash(prev_focus);
+        self.with_focus_flash_check(|this| {
+            if let Some(workspace) = this.active_workspace_mut() {
+                workspace.focus_right();
+            }
+        });
     }
 
     pub fn focus_column_first(&mut self) {
-        let prev_focus = self.focused_window_id();
-        if let Some(workspace) = self.active_workspace_mut() {
-            workspace.focus_column_first();
-        }
-        self.maybe_fire_focus_flash(prev_focus);
+        self.with_focus_flash_check(|this| {
+            if let Some(workspace) = this.active_workspace_mut() {
+                workspace.focus_column_first();
+            }
+        });
     }
 
     pub fn focus_column_last(&mut self) {
-        let prev_focus = self.focused_window_id();
-        if let Some(workspace) = self.active_workspace_mut() {
-            workspace.focus_column_last();
-        }
-        self.maybe_fire_focus_flash(prev_focus);
+        self.with_focus_flash_check(|this| {
+            if let Some(workspace) = this.active_workspace_mut() {
+                workspace.focus_column_last();
+            }
+        });
     }
 
     pub fn focus_column_right_or_first(&mut self) {
-        let prev_focus = self.focused_window_id();
-        if let Some(workspace) = self.active_workspace_mut() {
-            workspace.focus_column_right_or_first();
-        }
-        self.maybe_fire_focus_flash(prev_focus);
+        self.with_focus_flash_check(|this| {
+            if let Some(workspace) = this.active_workspace_mut() {
+                workspace.focus_column_right_or_first();
+            }
+        });
     }
 
     pub fn focus_column_left_or_last(&mut self) {
-        let prev_focus = self.focused_window_id();
-        if let Some(workspace) = self.active_workspace_mut() {
-            workspace.focus_column_left_or_last();
-        }
-        self.maybe_fire_focus_flash(prev_focus);
+        self.with_focus_flash_check(|this| {
+            if let Some(workspace) = this.active_workspace_mut() {
+                workspace.focus_column_left_or_last();
+            }
+        });
     }
 
     pub fn focus_column(&mut self, index: usize) {
-        let prev_focus = self.focused_window_id();
-        if let Some(workspace) = self.active_workspace_mut() {
-            workspace.focus_column(index);
-        }
-        self.maybe_fire_focus_flash(prev_focus);
+        self.with_focus_flash_check(|this| {
+            if let Some(workspace) = this.active_workspace_mut() {
+                workspace.focus_column(index);
+            }
+        });
     }
 
     pub fn focus_window_up_or_output(&mut self, output: &Output) -> bool {
+        // Doesn't use `with_focus_flash_check`: the cross-output fall-through calls
+        // `self.focus_output`, which already fires its own flash. Wrapping here would
+        // double-fire (harmless but wasteful).
         let prev_focus = self.focused_window_id();
         let moved = self.active_workspace_mut().is_some_and(|ws| ws.focus_up());
         if moved {
             self.maybe_fire_focus_flash(prev_focus);
             return false;
         }
-
-        // `focus_output` fires its own flash; no need to also call from here.
         self.focus_output(output);
         true
     }
@@ -2026,7 +2030,6 @@ impl<W: LayoutElement> Layout<W> {
             self.maybe_fire_focus_flash(prev_focus);
             return false;
         }
-
         self.focus_output(output);
         true
     }
@@ -2040,7 +2043,6 @@ impl<W: LayoutElement> Layout<W> {
             self.maybe_fire_focus_flash(prev_focus);
             return false;
         }
-
         self.focus_output(output);
         true
     }
@@ -2054,113 +2056,112 @@ impl<W: LayoutElement> Layout<W> {
             self.maybe_fire_focus_flash(prev_focus);
             return false;
         }
-
         self.focus_output(output);
         true
     }
 
     pub fn focus_window_in_column(&mut self, index: u8) {
-        let prev_focus = self.focused_window_id();
-        if let Some(workspace) = self.active_workspace_mut() {
-            workspace.focus_window_in_column(index);
-        }
-        self.maybe_fire_focus_flash(prev_focus);
+        self.with_focus_flash_check(|this| {
+            if let Some(workspace) = this.active_workspace_mut() {
+                workspace.focus_window_in_column(index);
+            }
+        });
     }
 
     pub fn focus_down(&mut self) {
-        let prev_focus = self.focused_window_id();
-        if let Some(workspace) = self.active_workspace_mut() {
-            workspace.focus_down();
-        }
-        self.maybe_fire_focus_flash(prev_focus);
+        self.with_focus_flash_check(|this| {
+            if let Some(workspace) = this.active_workspace_mut() {
+                workspace.focus_down();
+            }
+        });
     }
 
     pub fn focus_up(&mut self) {
-        let prev_focus = self.focused_window_id();
-        if let Some(workspace) = self.active_workspace_mut() {
-            workspace.focus_up();
-        }
-        self.maybe_fire_focus_flash(prev_focus);
+        self.with_focus_flash_check(|this| {
+            if let Some(workspace) = this.active_workspace_mut() {
+                workspace.focus_up();
+            }
+        });
     }
 
     pub fn focus_down_or_left(&mut self) {
-        let prev_focus = self.focused_window_id();
-        if let Some(workspace) = self.active_workspace_mut() {
-            workspace.focus_down_or_left();
-        }
-        self.maybe_fire_focus_flash(prev_focus);
+        self.with_focus_flash_check(|this| {
+            if let Some(workspace) = this.active_workspace_mut() {
+                workspace.focus_down_or_left();
+            }
+        });
     }
 
     pub fn focus_down_or_right(&mut self) {
-        let prev_focus = self.focused_window_id();
-        if let Some(workspace) = self.active_workspace_mut() {
-            workspace.focus_down_or_right();
-        }
-        self.maybe_fire_focus_flash(prev_focus);
+        self.with_focus_flash_check(|this| {
+            if let Some(workspace) = this.active_workspace_mut() {
+                workspace.focus_down_or_right();
+            }
+        });
     }
 
     pub fn focus_up_or_left(&mut self) {
-        let prev_focus = self.focused_window_id();
-        if let Some(workspace) = self.active_workspace_mut() {
-            workspace.focus_up_or_left();
-        }
-        self.maybe_fire_focus_flash(prev_focus);
+        self.with_focus_flash_check(|this| {
+            if let Some(workspace) = this.active_workspace_mut() {
+                workspace.focus_up_or_left();
+            }
+        });
     }
 
     pub fn focus_up_or_right(&mut self) {
-        let prev_focus = self.focused_window_id();
-        if let Some(workspace) = self.active_workspace_mut() {
-            workspace.focus_up_or_right();
-        }
-        self.maybe_fire_focus_flash(prev_focus);
+        self.with_focus_flash_check(|this| {
+            if let Some(workspace) = this.active_workspace_mut() {
+                workspace.focus_up_or_right();
+            }
+        });
     }
 
     pub fn focus_window_or_workspace_down(&mut self) {
-        let prev_focus = self.focused_window_id();
-        if let Some(monitor) = self.active_monitor() {
-            monitor.focus_window_or_workspace_down();
-        }
-        self.maybe_fire_focus_flash(prev_focus);
+        self.with_focus_flash_check(|this| {
+            if let Some(monitor) = this.active_monitor() {
+                monitor.focus_window_or_workspace_down();
+            }
+        });
     }
 
     pub fn focus_window_or_workspace_up(&mut self) {
-        let prev_focus = self.focused_window_id();
-        if let Some(monitor) = self.active_monitor() {
-            monitor.focus_window_or_workspace_up();
-        }
-        self.maybe_fire_focus_flash(prev_focus);
+        self.with_focus_flash_check(|this| {
+            if let Some(monitor) = this.active_monitor() {
+                monitor.focus_window_or_workspace_up();
+            }
+        });
     }
 
     pub fn focus_window_top(&mut self) {
-        let prev_focus = self.focused_window_id();
-        if let Some(workspace) = self.active_workspace_mut() {
-            workspace.focus_window_top();
-        }
-        self.maybe_fire_focus_flash(prev_focus);
+        self.with_focus_flash_check(|this| {
+            if let Some(workspace) = this.active_workspace_mut() {
+                workspace.focus_window_top();
+            }
+        });
     }
 
     pub fn focus_window_bottom(&mut self) {
-        let prev_focus = self.focused_window_id();
-        if let Some(workspace) = self.active_workspace_mut() {
-            workspace.focus_window_bottom();
-        }
-        self.maybe_fire_focus_flash(prev_focus);
+        self.with_focus_flash_check(|this| {
+            if let Some(workspace) = this.active_workspace_mut() {
+                workspace.focus_window_bottom();
+            }
+        });
     }
 
     pub fn focus_window_down_or_top(&mut self) {
-        let prev_focus = self.focused_window_id();
-        if let Some(workspace) = self.active_workspace_mut() {
-            workspace.focus_window_down_or_top();
-        }
-        self.maybe_fire_focus_flash(prev_focus);
+        self.with_focus_flash_check(|this| {
+            if let Some(workspace) = this.active_workspace_mut() {
+                workspace.focus_window_down_or_top();
+            }
+        });
     }
 
     pub fn focus_window_up_or_bottom(&mut self) {
-        let prev_focus = self.focused_window_id();
-        if let Some(workspace) = self.active_workspace_mut() {
-            workspace.focus_window_up_or_bottom();
-        }
-        self.maybe_fire_focus_flash(prev_focus);
+        self.with_focus_flash_check(|this| {
+            if let Some(workspace) = this.active_workspace_mut() {
+                workspace.focus_window_up_or_bottom();
+            }
+        });
     }
 
     pub fn move_to_workspace_up(&mut self, focus: bool) {
@@ -2230,43 +2231,43 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn switch_workspace_up(&mut self) {
-        let prev_focus = self.focused_window_id();
-        if let Some(monitor) = self.active_monitor() {
-            monitor.switch_workspace_up();
-        }
-        self.maybe_fire_focus_flash(prev_focus);
+        self.with_focus_flash_check(|this| {
+            if let Some(monitor) = this.active_monitor() {
+                monitor.switch_workspace_up();
+            }
+        });
     }
 
     pub fn switch_workspace_down(&mut self) {
-        let prev_focus = self.focused_window_id();
-        if let Some(monitor) = self.active_monitor() {
-            monitor.switch_workspace_down();
-        }
-        self.maybe_fire_focus_flash(prev_focus);
+        self.with_focus_flash_check(|this| {
+            if let Some(monitor) = this.active_monitor() {
+                monitor.switch_workspace_down();
+            }
+        });
     }
 
     pub fn switch_workspace(&mut self, idx: usize) {
-        let prev_focus = self.focused_window_id();
-        if let Some(monitor) = self.active_monitor() {
-            monitor.switch_workspace(idx);
-        }
-        self.maybe_fire_focus_flash(prev_focus);
+        self.with_focus_flash_check(|this| {
+            if let Some(monitor) = this.active_monitor() {
+                monitor.switch_workspace(idx);
+            }
+        });
     }
 
     pub fn switch_workspace_auto_back_and_forth(&mut self, idx: usize) {
-        let prev_focus = self.focused_window_id();
-        if let Some(monitor) = self.active_monitor() {
-            monitor.switch_workspace_auto_back_and_forth(idx);
-        }
-        self.maybe_fire_focus_flash(prev_focus);
+        self.with_focus_flash_check(|this| {
+            if let Some(monitor) = this.active_monitor() {
+                monitor.switch_workspace_auto_back_and_forth(idx);
+            }
+        });
     }
 
     pub fn switch_workspace_previous(&mut self) {
-        let prev_focus = self.focused_window_id();
-        if let Some(monitor) = self.active_monitor() {
-            monitor.switch_workspace_previous();
-        }
-        self.maybe_fire_focus_flash(prev_focus);
+        self.with_focus_flash_check(|this| {
+            if let Some(monitor) = this.active_monitor() {
+                monitor.switch_workspace_previous();
+            }
+        });
     }
 
     pub fn consume_into_column(&mut self) {
@@ -3284,27 +3285,27 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn focus_floating(&mut self) {
-        let prev_focus = self.focused_window_id();
-        if let Some(workspace) = self.active_workspace_mut() {
-            workspace.focus_floating();
-        }
-        self.maybe_fire_focus_flash(prev_focus);
+        self.with_focus_flash_check(|this| {
+            if let Some(workspace) = this.active_workspace_mut() {
+                workspace.focus_floating();
+            }
+        });
     }
 
     pub fn focus_tiling(&mut self) {
-        let prev_focus = self.focused_window_id();
-        if let Some(workspace) = self.active_workspace_mut() {
-            workspace.focus_tiling();
-        }
-        self.maybe_fire_focus_flash(prev_focus);
+        self.with_focus_flash_check(|this| {
+            if let Some(workspace) = this.active_workspace_mut() {
+                workspace.focus_tiling();
+            }
+        });
     }
 
     pub fn switch_focus_floating_tiling(&mut self) {
-        let prev_focus = self.focused_window_id();
-        if let Some(workspace) = self.active_workspace_mut() {
-            workspace.switch_focus_floating_tiling();
-        }
-        self.maybe_fire_focus_flash(prev_focus);
+        self.with_focus_flash_check(|this| {
+            if let Some(workspace) = this.active_workspace_mut() {
+                workspace.switch_focus_floating_tiling();
+            }
+        });
     }
 
     pub fn move_floating_window(
@@ -3333,21 +3334,21 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn focus_output(&mut self, output: &Output) {
-        let prev_focus = self.focused_window_id();
-        if let MonitorSet::Normal {
-            monitors,
-            active_monitor_idx,
-            ..
-        } = &mut self.monitor_set
-        {
-            for (idx, mon) in monitors.iter().enumerate() {
-                if &mon.output == output {
-                    *active_monitor_idx = idx;
-                    break;
+        self.with_focus_flash_check(|this| {
+            if let MonitorSet::Normal {
+                monitors,
+                active_monitor_idx,
+                ..
+            } = &mut this.monitor_set
+            {
+                for (idx, mon) in monitors.iter().enumerate() {
+                    if &mon.output == output {
+                        *active_monitor_idx = idx;
+                        break;
+                    }
                 }
             }
-        }
-        self.maybe_fire_focus_flash(prev_focus);
+        });
     }
 
     pub fn move_to_output(
