@@ -7,6 +7,7 @@ use niri_config::{CornerRadius, FocusFlash, LayoutPart};
 use smithay::backend::renderer::element::utils::{
     CropRenderElement, Relocate, RelocateRenderElement, RescaleRenderElement,
 };
+use smithay::backend::renderer::element::Kind;
 use smithay::output::Output;
 use smithay::utils::{Logical, Point, Rectangle, Size};
 
@@ -23,7 +24,7 @@ use crate::input::swipe_tracker::SwipeTracker;
 use crate::niri_render_elements;
 use crate::render_helpers::renderer::NiriRenderer;
 use crate::render_helpers::shadow::ShadowRenderElement;
-use crate::render_helpers::solid_color::SolidColorRenderElement;
+use crate::render_helpers::solid_color::{SolidColorBuffer, SolidColorRenderElement};
 use crate::render_helpers::xray::XrayPos;
 use crate::render_helpers::RenderCtx;
 use crate::rubber_band::RubberBand;
@@ -1138,6 +1139,73 @@ impl<W: LayoutElement> Monitor<W> {
         (alpha as f32).clamp(0.0, 1.0)
     }
 
+    /// Per-side filled rectangles at output bounds carrying the focus-flash color.
+    ///
+    /// Empty when the feature is disabled, no flash is in flight, or the active tile
+    /// is not in steady-state fullscreen — in transitional fullscreen states the
+    /// focus-ring/border path will eventually carry the flash, so we don't render
+    /// an edge frame on top of it.
+    pub fn focus_flash_render_elements(&self) -> Vec<SolidColorRenderElement> {
+        let alpha = self.focus_flash_alpha();
+        if alpha <= 0.0 {
+            return Vec::new();
+        }
+        let Some(cfg) = &self.options.layout.focus_flash else {
+            return Vec::new();
+        };
+
+        let ws = &self.workspaces[self.active_workspace_idx];
+        let Some(active_window) = ws.active_window() else {
+            return Vec::new();
+        };
+        let active_id = active_window.id();
+        let Some(tile) = ws.tiles().find(|t| t.window().id() == active_id) else {
+            return Vec::new();
+        };
+        if tile.fullscreen_progress() < 1.0 {
+            return Vec::new();
+        }
+
+        let view_w = self.view_size.w;
+        let view_h = self.view_size.h;
+        let edge = f64::from(cfg.edge_width);
+        if edge <= 0.0 || view_w <= 0.0 || view_h <= 0.0 {
+            return Vec::new();
+        }
+
+        let mut out = Vec::with_capacity(4);
+        let mut emit = |loc: Point<f64, Logical>, size: Size<f64, Logical>| {
+            let buf = SolidColorBuffer::new(size, cfg.flash_color);
+            out.push(SolidColorRenderElement::from_buffer(
+                &buf,
+                loc,
+                alpha,
+                Kind::Unspecified,
+            ));
+        };
+
+        if cfg.sides.top {
+            emit(Point::from((0.0, 0.0)), Size::from((view_w, edge)));
+        }
+        if cfg.sides.bottom {
+            emit(
+                Point::from((0.0, view_h - edge)),
+                Size::from((view_w, edge)),
+            );
+        }
+        if cfg.sides.left {
+            emit(Point::from((0.0, 0.0)), Size::from((edge, view_h)));
+        }
+        if cfg.sides.right {
+            emit(
+                Point::from((view_w - edge, 0.0)),
+                Size::from((edge, view_h)),
+            );
+        }
+
+        out
+    }
+
     pub fn are_transitions_ongoing(&self) -> bool {
         self.workspace_switch.is_some()
             || self
@@ -1732,6 +1800,17 @@ impl<W: LayoutElement> Monitor<W> {
         push: &mut dyn FnMut(MonitorRenderElement<R>),
     ) {
         let _span = tracy_client::span!("Monitor::render_workspaces");
+
+        // Focus-flash edge frame (fullscreen path). Pushed first so it sits on top of
+        // workspace content but stays below any layer-shell or cursor element pushed
+        // earlier by the caller.
+        for elem in self.focus_flash_render_elements() {
+            let elem = MonitorInnerRenderElement::SolidColor(elem);
+            let elem = RescaleRenderElement::from_element(elem, Point::default(), 1.);
+            let elem =
+                RelocateRenderElement::from_element(elem, Point::default(), Relocate::Relative);
+            push(elem);
+        }
 
         let scale = self.scale.fractional_scale();
         // Ceil the height in physical pixels.
