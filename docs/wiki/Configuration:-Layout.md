@@ -88,6 +88,14 @@ layout {
         // gradient from="#ffbb6680" to="#ffc88080" angle=45 relative-to="workspace-view"
     }
 
+    focus-flash {
+        flash-color "#ffe680"
+        pulse-duration-ms 200
+        pulses 1
+        edge-width 4
+        sides "top" "bottom" "left" "right"
+    }
+
     struts {
         // left 64
         // right 64
@@ -501,6 +509,33 @@ layout {
     }
 }
 ```
+
+### `focus-flash`
+
+<sup>Since: next release</sup>
+
+Visual feedback when focus arrives at a window. Off by default — omit the block to disable.
+
+For tiled windows, the focus ring (and border, if configured) animates through `flash-color` instead of jumping straight from `inactive-color` to `active-color`. For fullscreen windows, where the focus ring is hidden, a colored frame at the configured screen edges fades in and out instead. Same color, same timing, two carriers.
+
+`flash-color` is required when the block is present. Other fields are optional with sensible defaults.
+
+`pulse-duration-ms` controls how long one peak takes (the alpha rises from 0 → 1 → 0 in this duration). `pulses` controls how many peaks per focus arrival; valid range is 1–5. `edge-width` and `sides` are only used in the fullscreen path.
+
+```kdl
+layout {
+    focus-flash {
+        flash-color "#ffe680"
+        pulse-duration-ms 200
+        pulses 1
+        edge-width 4
+        // Default is all four sides. Override to flash only some edges:
+        // sides "top" "bottom"
+    }
+}
+```
+
+If focus changes again while a flash is in flight, the new flash starts from the current alpha rather than popping back to 0.
 
 ### `struts`
 
