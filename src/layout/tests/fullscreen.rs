@@ -948,6 +948,65 @@ fn tiled_focus_flash_does_not_affect_inactive_tile() {
 }
 
 #[test]
+fn focus_flash_unfullscreen_stops_edge_frame() {
+    let mut layout = build_focus_flash_layout(
+        focus_flash_options(),
+        &[
+            Op::AddOutput(1),
+            Op::AddWindow {
+                params: TestWindowParams::new(1),
+            },
+            Op::FullscreenWindow(1),
+            Op::Communicate(1),
+            Op::CompleteAnimations,
+        ],
+    );
+
+    start_flash_on_active_monitor(&mut layout);
+    check_ops_on_layout(&mut layout, [Op::AdvanceAnimations { msec_delta: 25 }]);
+    layout.update_render_elements(None);
+
+    // Sanity: with the window in steady-state fullscreen and the flash mid-pulse, the
+    // edge frame is rendered.
+    assert_eq!(
+        layout
+            .active_monitor_ref()
+            .expect("monitor")
+            .focus_flash_render_elements()
+            .len(),
+        4,
+        "edge frame should be rendering before unfullscreen",
+    );
+
+    // Unfullscreen the window mid-flash. The animation continues (so the tiled
+    // focus-ring/border path can carry the flash on the now-tiled window), but the
+    // fullscreen edge frame must stop rendering — the per-frame
+    // `tile.fullscreen_progress() >= 1.0` gate is the implicit cancel for this case.
+    check_ops_on_layout(
+        &mut layout,
+        [
+            Op::SetFullscreenWindow {
+                window: 1,
+                is_fullscreen: false,
+            },
+            Op::Communicate(1),
+            Op::AdvanceAnimations { msec_delta: 1 },
+        ],
+    );
+    layout.update_render_elements(None);
+
+    let mon = layout.active_monitor_ref().expect("monitor");
+    assert!(
+        mon.focus_flash_render_elements().is_empty(),
+        "edge frame must stop rendering when the focused window unfullscreens",
+    );
+    assert!(
+        mon.focus_flash_anim().is_some(),
+        "animation must continue so the tiled ring/border path keeps flashing",
+    );
+}
+
+#[test]
 fn tiled_focus_flash_alpha_correct_across_pulse_boundary() {
     // pulses=3, pulse-duration=100 → total 300 ms. Peaks at t=50, 150, 250 ms.
     // Verify the second-pulse peak is reached, which exercises the fractional-value

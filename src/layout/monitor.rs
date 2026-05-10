@@ -1174,6 +1174,11 @@ impl<W: LayoutElement> Monitor<W> {
         let Some(tile) = ws.active_tile() else {
             return Vec::new();
         };
+        // Implicit cancel for the unfullscreen-mid-flash case: the moment the focused
+        // tile starts leaving fullscreen, this gate flips and the edge frame stops
+        // rendering — no phantom frame around a now-tiled window. The animation
+        // itself stays in flight so the tiled focus-ring/border path keeps carrying
+        // the flash on the same window.
         if tile.fullscreen_progress() < 1.0 {
             return Vec::new();
         }
