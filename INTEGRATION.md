@@ -57,17 +57,16 @@ patches. It's not part of any commit. Current contents:
 ## Coordinating re-derivations across worktrees
 
 If you're working in a `worktrees/<topic>/` subdir, your re-derivation
-of `josh/integration` may collide with someone else's in another
-worktree. Coordinate before force-pushing integration:
+of `josh/integration` may collide with another worktree's. Always
+deploy a patch by re-deriving integration on top of every other live
+patch — never point `nix-config`'s `niri-flake` input at a single
+patch branch. Testing a patch means testing it stacked with every
+other deployed patch, not in isolation. Before you force-push
+integration:
 
-- If you only need to test your branch deployed, prefer the **single-patch
-  bisect pattern** (see `CLAUDE.md` "Bisecting / single-patch testing"):
-  point `nix-config`'s `niri-flake.inputs.niri-unstable.url` at your
-  patch branch directly, no integration regen needed.
-- If you DO need a regen (e.g., to combine your work with someone else's),
-  pull `origin/josh/integration` first, identify what's currently merged,
-  and include those branches in your regen — don't drop work that's
-  already deployed.
+- Pull `origin/josh/integration` first, identify what's currently
+  merged, and include those branches in your regen — don't drop work
+  that's already deployed.
 - Update this file in the same commit so the next reader sees the truth.
 
 ## Re-deriving integration

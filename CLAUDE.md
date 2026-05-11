@@ -44,7 +44,7 @@ niri-flake = {
 4. In `~/nix-config`: `nix flake update niri-flake` → commit the lock bump → push.
 5. On gnomon: `nixos-rebuild switch --flake ~/nix-config#gnomon` → restart niri (logout or `systemctl --user restart niri.service`).
 
-**Bisecting / single-patch testing:** to install one patch in isolation on gnomon (e.g., to bisect a regression), temporarily flip `inputs.niri-unstable.url` in `nix-config/flake.nix` to point at that patch branch (e.g., `github:joshsymonds/niri/josh/cross-monitor-column-insert`), `nix flake update niri-flake`, rebuild gnomon. Revert when done. Integration coexists with this pattern — it doesn't conflict.
+**Always test stacked, never in isolation.** `nix-config`'s `niri-flake.inputs.niri-unstable.url` always points at `josh/integration`. To validate a patch, re-derive integration with that patch included on top of every other live patch and rebuild gnomon. Do NOT flip the input to a single patch branch for bisect/isolation testing — that hides interactions between patches. If you need to identify which of N patches caused a regression, drop suspects from the integration regen list one at a time, not by repointing the input.
 
 ### Re-deriving integration
 
