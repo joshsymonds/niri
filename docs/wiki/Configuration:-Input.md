@@ -363,6 +363,27 @@ input {
 }
 ```
 
+<sup>Since: next-release</sup> You can optionally set `edge-deadzone` (logical pixels).
+Then, focus-follows-mouse won't focus a window if the cursor is within that many pixels of any edge of the candidate window — the cursor must commit into the window's interior.
+The boundary is half-open: a cursor at exactly `edge-deadzone` pixels from an edge is considered inside the active region.
+
+```kdl
+input {
+    // Require the cursor to be at least 20 logical pixels from any edge of a
+    // window before focus-follows-mouse activates it.
+    focus-follows-mouse edge-deadzone=20
+}
+```
+
+`edge-deadzone` is independent of `max-scroll-amount`.
+When both are set, focus-follows-mouse activates only if neither check rejects: the destination must be on screen within the scroll budget AND the cursor must already be inside the window's interior.
+
+```kdl
+input {
+    focus-follows-mouse max-scroll-amount="0%" edge-deadzone=20
+}
+```
+
 #### `workspace-auto-back-and-forth`
 
 Normally, switching to the same workspace by index twice will do nothing (since you're already on that workspace).
