@@ -6200,7 +6200,21 @@ impl Niri {
         }
 
         if let Some(window) = &new_focus.window {
-            if !self.layout.is_overview_open() && current_focus.window.as_ref() != Some(window) {
+            // Compare against the layout's keyboard-focused window, not the
+            // cursor's previous geometric window (`current_focus.window`).
+            // With edge-deadzone, those two diverge: the deadzone can suppress
+            // activation on the boundary-crossing motion, leaving keyboard
+            // focus on the old window even as `contents_under(pointer.
+            // current_location())` already reports the new one. A geometric
+            // same-check would then skip the deadzone re-evaluation on every
+            // subsequent motion and FFM would never fire for that window.
+            let already_focused = self
+                .layout
+                .active_workspace()
+                .and_then(|ws| ws.active_window())
+                .map(|m| &m.window)
+                == Some(&window.0);
+            if !self.layout.is_overview_open() && !already_focused {
                 let (window, hit) = window;
 
                 // Don't trigger focus-follows-mouse over the tab indicator.
