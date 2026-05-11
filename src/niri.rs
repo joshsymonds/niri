@@ -6219,6 +6219,31 @@ impl Niri {
                     }
                 }
 
+                if let Some(deadzone) = ffm.edge_deadzone {
+                    match hit {
+                        HitType::Activate { .. } => {
+                            // Pointer is on the tile activation region outside
+                            // the window's input region (the niri border) — the
+                            // cursor has not committed into the window.
+                            return;
+                        }
+                        HitType::Input { win_pos } => {
+                            let Some(output) = new_focus.output.as_ref() else {
+                                return;
+                            };
+                            let Some(output_geo) = self.global_space.output_geometry(output) else {
+                                return;
+                            };
+                            let pos_within_window =
+                                pointer.current_location() - output_geo.loc.to_f64() - *win_pos;
+                            let window_size = window.geometry().size.to_f64();
+                            if pointer_in_deadzone(pos_within_window, window_size, deadzone) {
+                                return;
+                            }
+                        }
+                    }
+                }
+
                 self.layout.activate_window_without_raising(window);
                 self.layer_shell_on_demand_focus = None;
             }
@@ -6480,6 +6505,16 @@ impl ClientData for ClientState {
     fn disconnected(&self, _client_id: ClientId, _reason: DisconnectReason) {}
 }
 
+/// Returns true iff `pos` is within `deadzone` pixels of any edge of a rectangle
+/// of `size` with its origin at `(0, 0)`. Boundary semantic: `pos` at exactly
+/// `deadzone` from an edge is NOT in the deadzone — the deadzone is the
+/// half-open interval `[0, deadzone)` from each edge. Callers transform pointer
+/// coordinates into window-local space before calling.
+fn pointer_in_deadzone(pos: Point<f64, Logical>, size: Size<f64, Logical>, deadzone: u16) -> bool {
+    let d = f64::from(deadzone);
+    pos.x < d || pos.y < d || pos.x > size.w - d || pos.y > size.h - d
+}
+
 fn scale_relocate_crop<E: Element>(
     elem: E,
     output_scale: Scale<f64>,
@@ -6526,5 +6561,100 @@ niri_render_elements! {
         Texture = PrimaryGpuTextureRenderElement,
         // Used for the CPU-rendered panels.
         RelocatedMemoryBuffer = RelocateRenderElement<MemoryRenderBufferRenderElement<R>>,
+    }
+}
+
+#[cfg(test)]
+mod ffm_deadzone_tests {
+    use smithay::utils::{Logical, Point, Size};
+
+    use super::pointer_in_deadzone;
+
+    fn size_500x400() -> Size<f64, Logical> {
+        Size::from((500., 400.))
+    }
+
+    #[test]
+    fn center_not_in_deadzone() {
+        assert!(!pointer_in_deadzone(
+            Point::from((250., 200.)),
+            size_500x400(),
+            20,
+        ));
+    }
+
+    #[test]
+    fn near_left_edge_in_deadzone() {
+        assert!(pointer_in_deadzone(
+            Point::from((19., 200.)),
+            size_500x400(),
+            20,
+        ));
+    }
+
+    #[test]
+    fn near_right_edge_in_deadzone() {
+        assert!(pointer_in_deadzone(
+            Point::from((481., 200.)),
+            size_500x400(),
+            20,
+        ));
+    }
+
+    #[test]
+    fn near_top_edge_in_deadzone() {
+        assert!(pointer_in_deadzone(
+            Point::from((250., 19.)),
+            size_500x400(),
+            20,
+        ));
+    }
+
+    #[test]
+    fn near_bottom_edge_in_deadzone() {
+        assert!(pointer_in_deadzone(
+            Point::from((250., 381.)),
+            size_500x400(),
+            20,
+        ));
+    }
+
+    #[test]
+    fn exactly_at_left_threshold_not_in_deadzone() {
+        assert!(!pointer_in_deadzone(
+            Point::from((20., 200.)),
+            size_500x400(),
+            20,
+        ));
+    }
+
+    #[test]
+    fn just_outside_left_edge_not_in_deadzone() {
+        assert!(!pointer_in_deadzone(
+            Point::from((21., 200.)),
+            size_500x400(),
+            20,
+        ));
+    }
+
+    #[test]
+    fn tiny_window_interior_in_deadzone() {
+        // 30x30 window, deadzone=20 → no usable interior; any interior point is
+        // within 20 of some edge.
+        assert!(pointer_in_deadzone(
+            Point::from((15., 15.)),
+            Size::from((30., 30.)),
+            20,
+        ));
+    }
+
+    #[test]
+    fn zero_deadzone_never_in_deadzone() {
+        // deadzone=0 → suppressed range is empty per half-open semantic.
+        assert!(!pointer_in_deadzone(
+            Point::from((0.5, 0.5)),
+            size_500x400(),
+            0,
+        ));
     }
 }
