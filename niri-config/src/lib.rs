@@ -635,6 +635,7 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     use super::*;
+    use crate::utils::Percent;
 
     #[test]
     fn can_create_default_config() {
@@ -1133,6 +1134,7 @@ mod tests {
                 focus_follows_mouse: Some(
                     FocusFollowsMouse {
                         max_scroll_amount: None,
+                        edge_deadzone: None,
                     },
                 ),
                 workspace_auto_back_and_forth: true,
@@ -2466,5 +2468,73 @@ mod tests {
         +                0.66667,
         "#,
         );
+    }
+
+    #[test]
+    fn focus_follows_mouse_edge_deadzone_alone() {
+        let parsed = do_parse(
+            r##"
+            input {
+                focus-follows-mouse edge-deadzone=20
+            }
+            "##,
+        );
+        let ffm = parsed.input.focus_follows_mouse.unwrap();
+        assert_eq!(ffm.edge_deadzone, Some(20));
+        assert_eq!(ffm.max_scroll_amount, None);
+    }
+
+    #[test]
+    fn focus_follows_mouse_edge_deadzone_absent() {
+        let parsed = do_parse(
+            r##"
+            input {
+                focus-follows-mouse
+            }
+            "##,
+        );
+        let ffm = parsed.input.focus_follows_mouse.unwrap();
+        assert_eq!(ffm.edge_deadzone, None);
+    }
+
+    #[test]
+    fn focus_follows_mouse_edge_deadzone_with_max_scroll_amount() {
+        let parsed = do_parse(
+            r##"
+            input {
+                focus-follows-mouse max-scroll-amount="0%" edge-deadzone=20
+            }
+            "##,
+        );
+        let ffm = parsed.input.focus_follows_mouse.unwrap();
+        assert_eq!(ffm.edge_deadzone, Some(20));
+        assert_eq!(ffm.max_scroll_amount, Some(Percent(0.0)));
+    }
+
+    #[test]
+    fn focus_follows_mouse_property_order_independent() {
+        let parsed = do_parse(
+            r##"
+            input {
+                focus-follows-mouse edge-deadzone=20 max-scroll-amount="0%"
+            }
+            "##,
+        );
+        let ffm = parsed.input.focus_follows_mouse.unwrap();
+        assert_eq!(ffm.edge_deadzone, Some(20));
+        assert_eq!(ffm.max_scroll_amount, Some(Percent(0.0)));
+    }
+
+    #[test]
+    fn focus_follows_mouse_edge_deadzone_zero() {
+        let parsed = do_parse(
+            r##"
+            input {
+                focus-follows-mouse edge-deadzone=0
+            }
+            "##,
+        );
+        let ffm = parsed.input.focus_follows_mouse.unwrap();
+        assert_eq!(ffm.edge_deadzone, Some(0));
     }
 }
