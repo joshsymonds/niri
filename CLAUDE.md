@@ -51,15 +51,18 @@ niri-flake = {
 Integration is regenerated from scratch every time the active patch set changes. There's no `rebase-integration` recipe because the inputs (which patches to merge) vary; the procedure is a few lines of plain git:
 
 ```sh
-# 1. Capture the current tooling commit SHA so we can replay it.
-TOOLING_SHA=$(git log josh/integration --format=%H -- justfile CLAUDE.md .envrc | head -1)
+# 1. Capture every tooling commit since main, oldest first.
+#    The list can be one commit (squashed) or several (incremental
+#    edits). Capture the full stack so none get dropped.
+TOOLING_SHAS=$(git log main..josh/integration --reverse --format=%H \
+    -- justfile CLAUDE.md INTEGRATION.md .envrc .gitignore)
 
 # 2. Reset integration to main.
 git checkout josh/integration
 git reset --hard main
 
-# 3. Replay the tooling commit.
-git cherry-pick "$TOOLING_SHA"
+# 3. Replay the tooling stack in order.
+git cherry-pick $TOOLING_SHAS
 
 # 4. Octopus-merge whichever patch branches you want gnomon running.
 #    The exact list lives in INTEGRATION.md — read it first to make sure
