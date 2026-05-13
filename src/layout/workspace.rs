@@ -1768,15 +1768,22 @@ impl<W: LayoutElement> Workspace<W> {
     }
 
     pub fn window_under(&self, pos: Point<f64, Logical>) -> Option<(&W, HitType)> {
-        // This logic is consistent with tiles_with_render_positions().
-        if self.is_floating_visible() {
-            if let Some(rv) = self
-                .floating
-                .tiles_with_render_positions()
-                .find_map(|(tile, tile_pos)| HitType::hit_tile(tile, tile_pos, pos))
-            {
-                return Some(rv);
-            }
+        // Hit-test floating tiles in a way that matches what's actually
+        // rendered. When the floating layer is generally hidden
+        // (fullscreen focused), tiles with `render-above-fullscreen` set
+        // still render via the AboveFullscreen pass — so they must still
+        // receive pointer input. Otherwise users see a visible toolbar
+        // but clicks fall through to the fullscreen surface behind it.
+        let test_all_floating = self.is_floating_visible();
+        if let Some(rv) = self
+            .floating
+            .tiles_with_render_positions()
+            .filter(|(tile, _)| {
+                test_all_floating || tile.window().rules().render_above_fullscreen == Some(true)
+            })
+            .find_map(|(tile, tile_pos)| HitType::hit_tile(tile, tile_pos, pos))
+        {
+            return Some(rv);
         }
 
         self.scrolling.window_under(pos)
