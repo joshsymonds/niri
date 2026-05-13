@@ -1647,7 +1647,16 @@ impl<W: LayoutElement> Workspace<W> {
         pass: FloatingRenderPass,
         push: &mut dyn FnMut(WorkspaceRenderElement<R>),
     ) {
-        if !self.is_floating_visible() {
+        // The AboveFullscreen pass MUST render even when fullscreen is
+        // focused — that's the whole point of the render-above-fullscreen
+        // window rule. niri's "fullscreen hides floating" mechanic is
+        // implemented as this conditional early-return (not as z-order),
+        // so we bypass it for flagged tiles.
+        //
+        // The BelowFullscreen pass keeps the existing visibility behavior:
+        // when fullscreen is focused, non-flagged floating tiles are
+        // hidden entirely (not rendered, not just behind).
+        if pass == FloatingRenderPass::BelowFullscreen && !self.is_floating_visible() {
             return;
         }
 

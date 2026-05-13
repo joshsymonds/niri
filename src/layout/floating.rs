@@ -69,23 +69,36 @@ pub struct FloatingSpace<W: LayoutElement> {
     options: Rc<Options>,
 }
 
-/// Which pass of floating-layer rendering is happening. The two-pass
-/// strategy lets floating tiles with the `render-above-fullscreen`
-/// window-rule property emit AFTER the scrolling layout, so they
-/// visually appear above fullscreen windows. Tiles without the rule
-/// emit BEFORE scrolling and render normally below fullscreen.
+/// Which pass of floating-layer rendering is happening.
 ///
-/// Called from `Monitor::render_workspaces` twice per workspace:
-/// once with `BelowFullscreen` before `render_scrolling`, once with
-/// `AboveFullscreen` after.
+/// **Important convention**: smithay's `OutputDamageTracker` paints
+/// elements in front-to-back order, so the FIRST-emitted element is
+/// the TOPMOST on screen. The variant names below describe the
+/// on-screen z-position (which matches the user-facing semantic of
+/// the `render-above-fullscreen` window rule), NOT the emit order.
+///
+/// Emit order (in `Monitor::render_workspaces`):
+///   1. `AboveFullscreen` — emitted first → topmost
+///   2. `BelowFullscreen` — emitted second → below the above-fullscreen tiles
+///   3. (`render_scrolling`) — emitted last → bottommost
+///
+/// `Workspace::render_floating` bypasses its `is_floating_visible()`
+/// guard for the `AboveFullscreen` pass, so flagged tiles render even
+/// when fullscreen is focused (which is the entire point of the rule).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FloatingRenderPass {
-    /// Emit only tiles without `render-above-fullscreen = Some(true)`.
+    /// Emit only tiles WITHOUT `render-above-fullscreen = Some(true)`.
+    /// Renders below the AboveFullscreen pass but above the scrolling
+    /// layout (when fullscreen isn't focused). When fullscreen IS
+    /// focused, the `is_floating_visible()` early-return in
+    /// `Workspace::render_floating` skips this pass entirely.
     /// Closing windows always render in this pass (they predate the
     /// rule and we don't track per-closing-window flag history).
     BelowFullscreen,
-    /// Emit only tiles with `render-above-fullscreen = Some(true)`.
-    /// Closing windows are skipped.
+    /// Emit only tiles WITH `render-above-fullscreen = Some(true)`.
+    /// Renders above everything else on screen, including fullscreen
+    /// windows in the scrolling layout. Bypasses the visibility
+    /// early-return. Closing windows are skipped.
     AboveFullscreen,
 }
 

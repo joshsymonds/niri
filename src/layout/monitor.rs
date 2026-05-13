@@ -1737,10 +1737,25 @@ impl<W: LayoutElement> Monitor<W> {
 
             let xray_pos = XrayPos::new(geo.loc, zoom);
 
-            // Two-pass floating render: tiles without `render-above-fullscreen`
-            // emit here (below scrolling, so fullscreen covers them as usual);
-            // tiles with the flag emit after `render_scrolling` below so they
-            // visually land above any fullscreen window.
+            // Two-pass floating render. The renderer paints first-emitted
+            // at the TOP of the on-screen z-stack (front-to-back order, per
+            // smithay's OutputDamageTracker), so flagged tiles must emit
+            // FIRST to land visually above scrolling content — including
+            // fullscreen windows, which live in the scrolling layout.
+            //
+            // Emission order is therefore the inverse of the on-screen
+            // z-position: AboveFullscreen → BelowFullscreen → insert hint
+            // → scrolling. On screen (top → bottom): flagged floating
+            // (AboveFullscreen) → non-flagged floating (BelowFullscreen)
+            // → insert hint → scrolling.
+            ws.render_floating(
+                ctx.r(),
+                xray_pos,
+                focus_ring,
+                FloatingRenderPass::AboveFullscreen,
+                push!(),
+            );
+
             ws.render_floating(
                 ctx.r(),
                 xray_pos,
@@ -1757,14 +1772,6 @@ impl<W: LayoutElement> Monitor<W> {
             }
 
             ws.render_scrolling(ctx.r(), xray_pos, focus_ring, push!());
-
-            ws.render_floating(
-                ctx.r(),
-                xray_pos,
-                focus_ring,
-                FloatingRenderPass::AboveFullscreen,
-                push!(),
-            );
         }
     }
 
