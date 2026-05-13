@@ -10,6 +10,7 @@ use smithay::backend::renderer::element::utils::{
 use smithay::output::Output;
 use smithay::utils::{Logical, Point, Rectangle, Size};
 
+use super::floating::FloatingRenderPass;
 use super::insert_hint_element::{InsertHintElement, InsertHintRenderElement};
 use super::scrolling::{Column, ColumnWidth};
 use super::tile::Tile;
@@ -1736,7 +1737,17 @@ impl<W: LayoutElement> Monitor<W> {
 
             let xray_pos = XrayPos::new(geo.loc, zoom);
 
-            ws.render_floating(ctx.r(), xray_pos, focus_ring, push!());
+            // Two-pass floating render: tiles without `render-above-fullscreen`
+            // emit here (below scrolling, so fullscreen covers them as usual);
+            // tiles with the flag emit after `render_scrolling` below so they
+            // visually land above any fullscreen window.
+            ws.render_floating(
+                ctx.r(),
+                xray_pos,
+                focus_ring,
+                FloatingRenderPass::BelowFullscreen,
+                push!(),
+            );
 
             if let Some(loc) = insert_hint_render_loc {
                 if loc.workspace == InsertWorkspace::Existing(ws.id()) {
@@ -1746,6 +1757,14 @@ impl<W: LayoutElement> Monitor<W> {
             }
 
             ws.render_scrolling(ctx.r(), xray_pos, focus_ring, push!());
+
+            ws.render_floating(
+                ctx.r(),
+                xray_pos,
+                focus_ring,
+                FloatingRenderPass::AboveFullscreen,
+                push!(),
+            );
         }
     }
 
