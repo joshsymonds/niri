@@ -69,6 +69,26 @@ pub struct FloatingSpace<W: LayoutElement> {
     options: Rc<Options>,
 }
 
+/// Which pass of floating-layer rendering is happening. The two-pass
+/// strategy lets floating tiles with the `render-above-fullscreen`
+/// window-rule property emit AFTER the scrolling layout, so they
+/// visually appear above fullscreen windows. Tiles without the rule
+/// emit BEFORE scrolling and render normally below fullscreen.
+///
+/// Called from `Monitor::render_workspaces` twice per workspace:
+/// once with `BelowFullscreen` before `render_scrolling`, once with
+/// `AboveFullscreen` after.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FloatingRenderPass {
+    /// Emit only tiles without `render-above-fullscreen = Some(true)`.
+    /// Closing windows always render in this pass (they predate the
+    /// rule and we don't track per-closing-window flag history).
+    BelowFullscreen,
+    /// Emit only tiles with `render-above-fullscreen = Some(true)`.
+    /// Closing windows are skipped.
+    AboveFullscreen,
+}
+
 niri_render_elements! {
     FloatingSpaceRenderElement<R> => {
         Tile = TileRenderElement<R>,
@@ -1062,6 +1082,7 @@ impl<W: LayoutElement> FloatingSpace<W> {
         xray_pos: XrayPos,
         view_rect: Rectangle<f64, Logical>,
         focus_ring: bool,
+        pass: FloatingRenderPass,
         push: &mut dyn FnMut(FloatingSpaceRenderElement<R>),
     ) {
         let scale = Scale::from(self.scale);
@@ -1069,13 +1090,28 @@ impl<W: LayoutElement> FloatingSpace<W> {
         // Draw the closing windows on top of the other windows.
         //
         // FIXME: I guess this should rather preserve the stacking order when the window is closed.
-        for closing in self.closing_windows.iter().rev() {
-            let elem = closing.render(ctx.as_gles(), view_rect, scale);
-            push(elem.into());
+        //
+        // Closing windows always render in the BelowFullscreen pass — we
+        // don't track per-closing-window flag history, and closing
+        // animations predate the render-above-fullscreen rule.
+        if pass == FloatingRenderPass::BelowFullscreen {
+            for closing in self.closing_windows.iter().rev() {
+                let elem = closing.render(ctx.as_gles(), view_rect, scale);
+                push(elem.into());
+            }
         }
 
         let active = self.active_window_id.clone();
         for (tile, tile_pos) in self.tiles_with_render_positions() {
+            let above = tile.window().rules().render_above_fullscreen == Some(true);
+            let include = match pass {
+                FloatingRenderPass::BelowFullscreen => !above,
+                FloatingRenderPass::AboveFullscreen => above,
+            };
+            if !include {
+                continue;
+            }
+
             // For the active tile, draw the focus ring.
             let focus_ring = focus_ring && Some(tile.window().id()) == active.as_ref();
 
