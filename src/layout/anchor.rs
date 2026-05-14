@@ -180,6 +180,13 @@ impl<Id: Eq + Hash + Clone + Debug> AnchorIndex<Id> {
     pub fn targets_iter(&self) -> impl Iterator<Item = &Id> + '_ {
         self.reverse.keys()
     }
+
+    /// Iterate the forward map as `(dependent, target)` pairs. Used by
+    /// [`crate::layout::Layout::verify_invariants`] to cross-check the
+    /// forward and reverse maps agree.
+    pub fn forward_pairs(&self) -> impl Iterator<Item = (&Id, &Id)> + '_ {
+        self.forward.iter()
+    }
 }
 
 #[cfg(test)]

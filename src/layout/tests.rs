@@ -753,6 +753,28 @@ enum Op {
         #[proptest(strategy = "arbitrary_layout_part().prop_map(Box::new)")]
         layout_config: Box<niri_config::LayoutPart>,
     },
+
+    // Cross-window anchor ops exercising the AnchorIndex + Layout cache
+    // invariants under randomized interleavings. None of these mutate the
+    // anchor index outside of the documented register/unregister/orphan
+    // entry points; the proptest harness's `verify_invariants` then
+    // cross-checks the forward/reverse maps and the workspace cache stay
+    // consistent regardless of what other Op variants do (close, move,
+    // workspace migrations).
+    RegisterFloatingAnchor {
+        #[proptest(strategy = "1..=5usize")]
+        dependent: usize,
+        #[proptest(strategy = "1..=5usize")]
+        target: usize,
+    },
+    UnregisterFloatingAnchor {
+        #[proptest(strategy = "1..=5usize")]
+        dependent: usize,
+    },
+    OrphanFloatingAnchorDependentsOf {
+        #[proptest(strategy = "1..=5usize")]
+        target: usize,
+    },
 }
 
 impl Op {
@@ -1625,6 +1647,33 @@ impl Op {
 
                 layout.update_options(options);
             }
+
+            // Cross-window anchor ops. Skip silently if either id isn't a
+            // mapped window — registering against a non-existent target
+            // would violate the invariant; the harness pre-checks here so
+            // verify_invariants stays meaningful when these ops interleave
+            // with arbitrary CloseWindow / AddWindow sequences.
+            Op::RegisterFloatingAnchor { dependent, target } => {
+                if dependent == target {
+                    return;
+                }
+                if !layout.has_window(&dependent) || !layout.has_window(&target) {
+                    return;
+                }
+                layout.register_floating_anchor(dependent, target);
+            }
+            Op::UnregisterFloatingAnchor { dependent } => {
+                if !layout.has_window(&dependent) {
+                    return;
+                }
+                layout.unregister_floating_anchor(&dependent);
+            }
+            Op::OrphanFloatingAnchorDependentsOf { target } => {
+                if !layout.has_window(&target) {
+                    return;
+                }
+                layout.orphan_floating_anchor_dependents_of(&target);
+            }
         }
     }
 }
@@ -1749,6 +1798,16 @@ fn operations_dont_panic() {
         Op::ConsumeOrExpelWindowRight { id: None },
         Op::MoveWorkspaceToOutput(1),
         Op::ToggleColumnTabbedDisplay,
+        Op::RegisterFloatingAnchor {
+            dependent: 1,
+            target: 2,
+        },
+        Op::RegisterFloatingAnchor {
+            dependent: 2,
+            target: 3,
+        },
+        Op::UnregisterFloatingAnchor { dependent: 1 },
+        Op::OrphanFloatingAnchorDependentsOf { target: 2 },
     ];
 
     for third in &every_op {
@@ -1928,6 +1987,21 @@ fn operations_from_starting_state_dont_panic() {
         Op::ConsumeOrExpelWindowLeft { id: None },
         Op::ConsumeOrExpelWindowRight { id: None },
         Op::ToggleColumnTabbedDisplay,
+        Op::RegisterFloatingAnchor {
+            dependent: 1,
+            target: 2,
+        },
+        Op::RegisterFloatingAnchor {
+            dependent: 2,
+            target: 3,
+        },
+        Op::RegisterFloatingAnchor {
+            dependent: 4,
+            target: 5,
+        },
+        Op::UnregisterFloatingAnchor { dependent: 1 },
+        Op::OrphanFloatingAnchorDependentsOf { target: 2 },
+        Op::OrphanFloatingAnchorDependentsOf { target: 5 },
     ];
 
     for third in &every_op {
