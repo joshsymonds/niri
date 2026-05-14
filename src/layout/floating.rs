@@ -1294,10 +1294,16 @@ impl<W: LayoutElement> FloatingSpace<W> {
                 {
                     pos.y = area.size.h - size.h - pos.y;
                 }
-                if relative_to == RelativeTo::Top || relative_to == RelativeTo::Bottom {
+                if matches!(
+                    relative_to,
+                    RelativeTo::Top | RelativeTo::Bottom | RelativeTo::Center
+                ) {
                     pos.x += area.size.w / 2.0 - size.w / 2.0
                 }
-                if relative_to == RelativeTo::Left || relative_to == RelativeTo::Right {
+                if matches!(
+                    relative_to,
+                    RelativeTo::Left | RelativeTo::Right | RelativeTo::Center
+                ) {
                     pos.y += area.size.h / 2.0 - size.h / 2.0
                 }
 
