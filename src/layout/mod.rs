@@ -4244,6 +4244,16 @@ impl<W: LayoutElement> Layout<W> {
                         .animate_move_from((tile_pos - new_tile_pos).downscale(zoom));
                 }
 
+                // User committed to dragging — break any cross-window anchor
+                // so future target moves don't yank the dialog back to the
+                // anchored position. Per the epic's user-drag-breaks-anchor
+                // policy. No-op if `window` wasn't registered. We unregister
+                // ONLY at the Starting -> Moving transition (i.e. past the
+                // drag-start threshold for scrolling tiles, immediate for
+                // floating); brief clicks or below-threshold jiggles don't
+                // break the anchor.
+                self.unregister_floating_anchor(window);
+
                 self.interactive_move = Some(InteractiveMoveState::Moving(data));
             }
             InteractiveMoveState::Moving(mut move_) => {
