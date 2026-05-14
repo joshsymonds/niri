@@ -378,13 +378,24 @@ pub struct Layout<W: LayoutElement> {
     /// Cleared on dialog close and on target close (the latter orphans the
     /// dependent without re-resolving — per the MRU-at-open-time policy).
     floating_anchors: anchor::AnchorIndex<W::Id>,
-    /// Per-target last-seen rect cache. Filled by [`Self::notify_tile_changed`]
-    /// on each event; the sweep in [`Self::resweep_all_anchor_dependents`]
-    /// compares the current rect to this cache to skip repositioning targets
-    /// that haven't moved. Without this cache the sweep would re-place every
-    /// dependent on every animation frame regardless of whether the target
-    /// actually moved.
-    floating_anchor_target_rects: HashMap<W::Id, Rectangle<f64, Logical>>,
+    /// Per-target last-seen `(workspace, rect)` cache. Filled by
+    /// [`Self::notify_tile_changed`] on each event; the sweep in
+    /// [`Self::resweep_all_anchor_dependents`] compares the current tuple
+    /// to this cache to skip repositioning targets that haven't moved.
+    /// **The workspace id is part of the cache key** because a target
+    /// migrating to another workspace can have identical workspace-local
+    /// rect coordinates (struts and tile size are workspace-independent),
+    /// so a rect-only cache would silently miss cross-workspace migrations
+    /// when the new local coordinates happen to match the old.
+    floating_anchor_target_rects: HashMap<W::Id, (WorkspaceId, Rectangle<f64, Logical>)>,
+    /// Reusable scratch buffer for the per-frame anchor sweep. Holds a
+    /// snapshot of `floating_anchors.targets_iter()` so the immutable
+    /// borrow on `floating_anchors` can be released before calling
+    /// `&mut self` methods on each target in turn. Stored on `Self` so the
+    /// allocation persists across frames and the sweep is allocation-free
+    /// in steady state — only the per-target `tile_visual_rect` walk
+    /// remains hot.
+    floating_anchor_sweep_scratch: Vec<W::Id>,
 }
 
 #[derive(Debug)]
@@ -725,6 +736,7 @@ impl<W: LayoutElement> Layout<W> {
             options: Rc::new(options),
             floating_anchors: anchor::AnchorIndex::new(),
             floating_anchor_target_rects: HashMap::new(),
+            floating_anchor_sweep_scratch: Vec::new(),
         }
     }
 
@@ -752,6 +764,7 @@ impl<W: LayoutElement> Layout<W> {
             options: opts,
             floating_anchors: anchor::AnchorIndex::new(),
             floating_anchor_target_rects: HashMap::new(),
+            floating_anchor_sweep_scratch: Vec::new(),
         }
     }
 
@@ -769,8 +782,11 @@ impl<W: LayoutElement> Layout<W> {
                 chain_depth, dependent, target,
             );
         }
-        if let Some(rect) = self.tile_visual_rect(&target) {
-            self.floating_anchor_target_rects.insert(target, rect);
+        if let Some((ws_id, _, _)) = self.find_window_position_by_id(&target) {
+            if let Some(rect) = self.tile_visual_rect(&target) {
+                self.floating_anchor_target_rects
+                    .insert(target, (ws_id, rect));
+            }
         }
     }
 
@@ -905,10 +921,6 @@ impl<W: LayoutElement> Layout<W> {
     /// Updates the target-rect cache so the next sweep can compare-and-skip
     /// when the rect hasn't moved.
     pub fn notify_tile_changed(&mut self, target_id: &W::Id, new_rect: Rectangle<f64, Logical>) {
-        // Update cache first so a sweep racing this notify converges.
-        self.floating_anchor_target_rects
-            .insert(target_id.clone(), new_rect);
-
         // O(1) reverse-index lookup. If no dependents, return immediately —
         // this is the no-op path for tiles that aren't anchor targets.
         let dependents: Vec<W::Id> = self
@@ -917,6 +929,13 @@ impl<W: LayoutElement> Layout<W> {
             .cloned()
             .collect();
         if dependents.is_empty() {
+            // Still refresh the cache for the no-dependents case so the
+            // sweep's compare-and-skip stays accurate if the target later
+            // acquires a dependent.
+            if let Some((ws_id, _, _)) = self.find_window_position_by_id(target_id) {
+                self.floating_anchor_target_rects
+                    .insert(target_id.clone(), (ws_id, new_rect));
+            }
             return;
         }
 
@@ -926,6 +945,15 @@ impl<W: LayoutElement> Layout<W> {
         let target_location: Option<(WorkspaceId, Output, usize)> = self
             .find_window_position_by_id(target_id)
             .map(|(ws_id, output, idx)| (ws_id, output.clone(), idx));
+
+        // Update cache: workspace + rect. Done before the per-dependent
+        // loop so a sweep racing this notify converges, and so a notify
+        // for a target that just migrated correctly records the new
+        // workspace.
+        if let Some((ws_id, _, _)) = target_location.as_ref() {
+            self.floating_anchor_target_rects
+                .insert(target_id.clone(), (*ws_id, new_rect));
+        }
 
         for dependent in dependents {
             // Look up the dependent's current workspace fresh each event.
@@ -980,32 +1008,66 @@ impl<W: LayoutElement> Layout<W> {
     /// Reverse-keyed sweep driven from [`Self::advance_animations`]. For
     /// each unique anchor *target* (not each dependent), compares the
     /// target's current rect to the cached last-seen rect; fires
-    /// [`Self::notify_tile_changed`] only on actual change. This is the
-    /// fallback driver for mutators that don't yet fire `notify_tile_changed`
-    /// directly — once every relevant mutator hooks the event, this sweep
-    /// becomes redundant.
+    /// [`Self::notify_tile_changed`] only on actual change.
+    ///
+    /// **Why a per-frame sweep instead of pure event-driven dispatch.**
+    /// niri does not currently expose a unified tile-geometry-changed signal
+    /// that fires from every mutator that can move a tile (column resize,
+    /// scroll, workspace switch, fullscreen toggle, interactive move, etc.).
+    /// Wiring `notify_tile_changed` calls into every such mutator is the
+    /// ideal architecture — see the FOLLOW-UP task ("Per-mutator synchronous
+    /// `notify_tile_changed` hooks (removes sweep dependency)") — and would
+    /// reduce the cost of unchanged frames to O(1) on the layout side.
+    /// Until that wiring exists, this sweep is the correctness fallback. It
+    /// is **not** open-ended polling:
+    ///
+    /// 1. It runs only when `advance_animations` is already running (animation frames). Static
+    ///    frames with no animations don't tick this path.
+    /// 2. The `is_empty()` early-return makes it O(1) when nothing is anchored.
+    /// 3. The cached-rect comparison makes unchanged targets a single map lookup + equality test —
+    ///    no repositioning work.
+    /// 4. The scratch buffer (`floating_anchor_sweep_scratch`) is reused across frames so the
+    ///    steady-state allocator cost is zero.
     ///
     /// Cost: O(1) when no anchors are registered (early return). Otherwise
-    /// O(unique_targets) tile-rect lookups + O(changed_targets × dependents)
-    /// repositions. Targets with no actual rect change cost only the
-    /// comparison.
+    /// O(unique_targets × workspaces × tiles_per_workspace) — the per-target
+    /// `tile_visual_rect` lookup is the dominant term; with typical niri
+    /// workloads (≤ 50 windows across few workspaces, ≤ 3 anchored dialogs)
+    /// this is microseconds and well within frame budget. Targets with no
+    /// actual rect change cost only the comparison (zero repositioning).
     pub fn resweep_all_anchor_dependents(&mut self) {
         if self.floating_anchors.is_empty() {
             return;
         }
 
-        // Snapshot unique targets to release the immutable borrow.
-        let targets: Vec<W::Id> = self.floating_anchors.targets_iter().cloned().collect();
-        for target_id in targets {
-            let Some(current_rect) = self.tile_visual_rect(&target_id) else {
+        // Snapshot unique targets into the reusable scratch buffer so the
+        // immutable borrow on `floating_anchors` is released before each
+        // per-target `&mut self` call. The buffer's allocation persists
+        // across frames — only its length resets each call.
+        let mut scratch = std::mem::take(&mut self.floating_anchor_sweep_scratch);
+        scratch.clear();
+        scratch.extend(self.floating_anchors.targets_iter().cloned());
+        for target_id in &scratch {
+            let Some(current_rect) = self.tile_visual_rect(target_id) else {
                 continue;
             };
-            let cached = self.floating_anchor_target_rects.get(&target_id).copied();
-            if cached == Some(current_rect) {
-                continue;
+            // Resolve target's current workspace so cross-workspace
+            // migrations are detected even when the workspace-local rect
+            // coordinates match the cached entry.
+            let current_ws = self
+                .find_window_position_by_id(target_id)
+                .map(|(ws_id, _, _)| ws_id);
+            let cached = self.floating_anchor_target_rects.get(target_id).copied();
+            if let (Some(ws_id), Some((cached_ws, cached_rect))) = (current_ws, cached) {
+                if ws_id == cached_ws && current_rect == cached_rect {
+                    continue;
+                }
             }
-            self.notify_tile_changed(&target_id, current_rect);
+            self.notify_tile_changed(target_id, current_rect);
         }
+        // Return the buffer to its owner so the next sweep reuses the
+        // allocation. Length is whatever the just-completed sweep saw.
+        self.floating_anchor_sweep_scratch = scratch;
     }
 
     /// Re-position a single registered dependent against its target's

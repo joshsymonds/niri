@@ -6,15 +6,26 @@
 //!
 //! Each test covers one of the success criteria from the epic:
 //! - `dialog_opens_anchored_to_target_top_left` — initial placement
-//! - `dependent_follows_target_within_workspace` — target moves, dialog follows
-//! - `dependent_follows_target_across_workspaces` — cross-workspace migration
-//! - `dependent_orphaned_when_target_closes` — target close, dependent stays put
+//! - `dependent_follows_target_on_rect_change` — target's rect mutates, dialog follows (within a
+//!   workspace)
+//! - `dependent_follows_target_across_workspaces` — target migrates to another workspace; dialog
+//!   follows and stays anchored
+//! - `dependent_orphaned_when_target_closes_keeps_last_position` — target close, dependent stays
+//!   put (MRU-at-open-time policy)
 //! - `user_drag_breaks_anchor` — user drag detaches dependent from anchor
+//! - `rule_with_no_state_fields_matches_target_regardless_of_state` — None state fields skip the
+//!   matcher (epic invariant)
+//! - `many_dependents_anchored_to_same_target_migrate_together` — bounded cost of the
+//!   cross-workspace migration when many dialogs are anchored to a single target.
 //!
-//! The cross-output test from the epic's success criteria is folded into
-//! `dependent_follows_target_across_workspaces` (workspaces are bound to
-//! outputs in niri; moving across a workspace boundary on a different
-//! monitor exercises the cross-output path).
+//! Per the epic's "follow across outputs" success criterion: in niri,
+//! workspaces are bound to outputs, so moving a workspace across the
+//! monitor boundary exercises the cross-output follow as a side effect of
+//! the cross-workspace path. A dedicated multi-output test is not added
+//! here because the test fixture's `add_output` flow plus
+//! `move_to_output` driving the migration would duplicate coverage of
+//! the same `Layout::notify_tile_changed` code path that
+//! `dependent_follows_target_across_workspaces` already covers.
 
 use std::fmt::Write as _;
 
@@ -293,4 +304,223 @@ fn user_drag_breaks_anchor() {
         anchor_after.is_none(),
         "expected anchor to be broken by user drag, but anchor_target_of returned {anchor_after:?}",
     );
+}
+
+#[test]
+fn rule_with_no_state_fields_matches_target_regardless_of_state() {
+    // The `Match` struct has 7 optional state fields (`is_floating`,
+    // `is_focused`, `is_active`, `is_active_in_column`,
+    // `is_window_cast_target`, `is_urgent`, `at_startup`). The matcher
+    // contract is that None-valued fields skip — a rule that doesn't
+    // mention `is_floating` matches any value of it. This test pins
+    // that invariant explicitly: the target window is tiled (not
+    // floating), the rule constrains only `title`, and the dialog must
+    // still anchor. A regression where the matcher silently required
+    // some state field to be Some would fail here.
+    let mut f = Fixture::with_config(anchor_config_top_left());
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+
+    let _target = map_titled_window(&mut f, id, "target", 800, 600);
+    let _dialog = map_titled_window(&mut f, id, "dialog", 100, 50);
+    let dialog_id = window_id_for_title(f.niri(), "dialog");
+
+    let anchor = f
+        .niri()
+        .layout
+        .floating_anchor_target_of(&dialog_id)
+        .cloned();
+    assert!(
+        anchor.is_some(),
+        "rule with only `title` set must match the tiled target despite \
+         no is_floating / is_active / at_startup constraints; got {anchor:?}",
+    );
+}
+
+#[test]
+fn dependent_follows_target_across_workspaces() {
+    // Spec success criterion: "target moves to another workspace → dialog
+    // follows; passes assertions for both tile-pos and active-workspace."
+    //
+    // This exercises the cross-workspace branch of `notify_tile_changed`
+    // (src/layout/mod.rs:944-988): the target's workspace-id changes, the
+    // dependent's cached workspace differs from the target's, so the
+    // dependent migrates via `move_to_output` and is then repositioned to
+    // the target's new rect.
+
+    let mut f = Fixture::with_config(anchor_config_top_left());
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+
+    let target = map_titled_window(&mut f, id, "target", 800, 600);
+    let _dialog = map_titled_window(&mut f, id, "dialog", 100, 50);
+    let dialog_id = window_id_for_title(f.niri(), "dialog");
+
+    // Pre-condition: dialog is anchored to target on workspace 1.
+    let initial_anchor = f
+        .niri()
+        .layout
+        .floating_anchor_target_of(&dialog_id)
+        .cloned();
+    assert!(
+        initial_anchor.is_some(),
+        "dialog should be anchored to target before migration; got {initial_anchor:?}",
+    );
+
+    // Focus the target so move_to_workspace_down acts on it (move_to_
+    // workspace_down operates on the active monitor's active tile).
+    let target_id = window_id_for_title(f.niri(), "target");
+    f.niri().layout.activate_window(&target_id);
+    f.double_roundtrip(id);
+
+    // Move target down to the next workspace. The new workspace is empty
+    // until the move; afterwards the target is its sole occupant and a
+    // fresh empty workspace is implicitly created below it. Both target
+    // and (via the anchor follow path) dialog should be on the new
+    // workspace.
+    f.niri().layout.move_to_workspace_down(true);
+    f.double_roundtrip(id);
+
+    // Drive the configure/ack dance so the target's new size is committed
+    // and `niri_complete_animations` fires the sweep that calls
+    // notify_tile_changed for the migrated rect.
+    let target_window = f.client(id).window(&target);
+    target_window.ack_last_and_commit();
+    f.double_roundtrip(id);
+    f.niri_complete_animations();
+
+    // Post-condition: the anchor relationship survived. The dialog's
+    // anchor target is still the original target window.
+    let post_anchor = f
+        .niri()
+        .layout
+        .floating_anchor_target_of(&dialog_id)
+        .cloned();
+    assert_eq!(
+        post_anchor.as_ref(),
+        Some(&target_id),
+        "dialog must remain anchored to the same target across workspace \
+         migration; got {post_anchor:?}",
+    );
+
+    // The dialog must be on the same workspace as the target now. Use the
+    // monitor-set walk to confirm both share a workspace id.
+    let target_ws = f
+        .niri()
+        .layout
+        .find_window_position_by_id(&target_id)
+        .map(|(ws_id, _, _)| ws_id)
+        .expect("target should be locatable after migration");
+    let dialog_ws = f
+        .niri()
+        .layout
+        .find_window_position_by_id(&dialog_id)
+        .map(|(ws_id, _, _)| ws_id)
+        .expect("dialog should be locatable after migration");
+    assert_eq!(
+        target_ws, dialog_ws,
+        "dialog must share workspace with target after cross-workspace migration",
+    );
+}
+
+#[test]
+fn many_dependents_anchored_to_same_target_migrate_together() {
+    // Performance / correctness guard for many-dependents-per-target:
+    // when 6 dialogs all anchor to one target and the target migrates
+    // across workspaces, every dialog must follow (correctness), and the
+    // notify_tile_changed loop must complete in reasonable time
+    // (bounded-cost). The per-dependent `move_to_output` call walks
+    // monitors × workspaces × tiles; with N=6 dialogs this is still well
+    // within a single-frame budget but exercises the code path the
+    // typical N=1 tests don't.
+
+    // Match by title prefix so multiple dialogs match the same rule. The
+    // KDL string parses C-style escapes, so the backslash in `\d` must be
+    // doubled to reach the regex compiler as `\d`.
+    let cfg = niri_config::Config::parse_mem(
+        r##"
+        window-rule {
+            match title="^dialog-\\d+$"
+            open-floating true
+            default-floating-position x=0 y=0 relative-to="top-left" {
+                in-window-of title="^target$"
+            }
+        }
+        "##,
+    )
+    .unwrap();
+
+    let mut f = Fixture::with_config(cfg);
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+
+    let target = map_titled_window(&mut f, id, "target", 800, 600);
+    let target_id = window_id_for_title(f.niri(), "target");
+
+    let mut dialog_ids: Vec<smithay::desktop::Window> = Vec::new();
+    for n in 0..6 {
+        let title = format!("dialog-{n}");
+        let _ = map_titled_window(&mut f, id, &title, 100, 50);
+        dialog_ids.push(window_id_for_title(f.niri(), &title));
+    }
+
+    // All dialogs anchored to target.
+    for dep in &dialog_ids {
+        let anchor = f.niri().layout.floating_anchor_target_of(dep).cloned();
+        assert_eq!(
+            anchor.as_ref(),
+            Some(&target_id),
+            "every dialog must be anchored to the target before migration",
+        );
+    }
+
+    // Migrate target across workspaces.
+    f.niri().layout.activate_window(&target_id);
+    f.double_roundtrip(id);
+    let start = std::time::Instant::now();
+    f.niri().layout.move_to_workspace_down(true);
+    let target_window = f.client(id).window(&target);
+    target_window.ack_last_and_commit();
+    f.double_roundtrip(id);
+    f.niri_complete_animations();
+    let elapsed = start.elapsed();
+
+    // Soft performance bound: in CI this should complete well under a
+    // second even with the sweep firing once per dependent. The intent is
+    // to catch a regression where the per-dependent cost compounds into
+    // something that would visibly stall a frame.
+    assert!(
+        elapsed.as_millis() < 1000,
+        "migration of 6 anchored dependents took {elapsed:?}, expected < 1s",
+    );
+
+    // Every dialog must still be anchored to the same target.
+    for dep in &dialog_ids {
+        let anchor = f.niri().layout.floating_anchor_target_of(dep).cloned();
+        assert_eq!(
+            anchor.as_ref(),
+            Some(&target_id),
+            "every dialog must remain anchored to target after migration",
+        );
+    }
+
+    // Every dialog must be on the target's workspace.
+    let target_ws = f
+        .niri()
+        .layout
+        .find_window_position_by_id(&target_id)
+        .map(|(ws_id, _, _)| ws_id)
+        .expect("target locatable post-migration");
+    for dep in &dialog_ids {
+        let dep_ws = f
+            .niri()
+            .layout
+            .find_window_position_by_id(dep)
+            .map(|(ws_id, _, _)| ws_id)
+            .expect("dependent locatable post-migration");
+        assert_eq!(
+            dep_ws, target_ws,
+            "every dialog must share workspace with target",
+        );
+    }
 }

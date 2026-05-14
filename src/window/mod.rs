@@ -554,54 +554,48 @@ where
     Id: Clone,
     I: IntoIterator<Item = TargetCandidate<Id>>,
 {
-    let all: Vec<TargetCandidate<Id>> = candidates.into_iter().collect();
-    if all.is_empty() {
-        return None;
+    // Single-pass layered filter: maintain a best-so-far tracker for each
+    // of the three priority layers (same-workspace, same-output, anywhere).
+    // The layer of a candidate's MRU pick is "best wins MRU within the
+    // most-specific layer it satisfies", so a same-workspace candidate
+    // never gets beaten by a same-output candidate even if the latter is
+    // more recently focused. After the walk, return the most-specific
+    // populated layer's pick.
+    let mut best_workspace: Option<TargetCandidate<Id>> = None;
+    let mut best_output: Option<TargetCandidate<Id>> = None;
+    let mut best_any: Option<TargetCandidate<Id>> = None;
+
+    for c in candidates {
+        if c.workspace_id == dependent_workspace_id {
+            update_mru(&mut best_workspace, &c);
+        }
+        if c.output_name.as_deref() == dependent_output_name {
+            update_mru(&mut best_output, &c);
+        }
+        update_mru(&mut best_any, &c);
     }
 
-    // Layer 1: same workspace.
-    let by_workspace: Vec<TargetCandidate<Id>> = all
-        .iter()
-        .filter(|c| c.workspace_id == dependent_workspace_id)
-        .cloned()
-        .collect();
-    if !by_workspace.is_empty() {
-        return pick_mru(by_workspace);
-    }
-
-    // Layer 2: same output.
-    let by_output: Vec<TargetCandidate<Id>> = all
-        .iter()
-        .filter(|c| c.output_name.as_deref() == dependent_output_name)
-        .cloned()
-        .collect();
-    if !by_output.is_empty() {
-        return pick_mru(by_output);
-    }
-
-    // Layer 3: anywhere.
-    pick_mru(all)
+    best_workspace.or(best_output).or(best_any).map(|c| c.id)
 }
 
-fn pick_mru<Id, I>(it: I) -> Option<Id>
-where
-    I: IntoIterator<Item = TargetCandidate<Id>>,
-{
-    let mut best: Option<TargetCandidate<Id>> = None;
-    for c in it {
-        let beats = match best.as_ref() {
-            None => true,
-            Some(b) => match (c.focus_timestamp, b.focus_timestamp) {
-                (Some(ct), Some(bt)) => ct > bt,
-                (Some(_), None) => true,
-                (None, _) => false,
-            },
-        };
-        if beats {
-            best = Some(c);
-        }
+/// MRU comparison used by [`resolve_target`]. `current` is updated in place
+/// to `candidate` if the candidate beats it under the MRU rule
+/// (`Some(t) > None`, larger timestamp wins, ties keep the existing).
+fn update_mru<Id: Clone>(
+    current: &mut Option<TargetCandidate<Id>>,
+    candidate: &TargetCandidate<Id>,
+) {
+    let beats = match current.as_ref() {
+        None => true,
+        Some(b) => match (candidate.focus_timestamp, b.focus_timestamp) {
+            (Some(ct), Some(bt)) => ct > bt,
+            (Some(_), None) => true,
+            (None, _) => false,
+        },
+    };
+    if beats {
+        *current = Some(candidate.clone());
     }
-    best.map(|c| c.id)
 }
 
 #[cfg(test)]
