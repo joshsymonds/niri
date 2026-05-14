@@ -451,7 +451,7 @@ fn window_matches(window: WindowRef, role: &XdgToplevelSurfaceRoleAttributes, m:
 /// Adapter that evaluates a [`Match`] against a mapped window, mirroring the
 /// shape `ResolvedWindowRules::compute` uses at rule-resolution time. Reuses
 /// [`window_matches`] verbatim rather than duplicating the matcher logic.
-pub fn mapped_matches(mapped: &Mapped, m: &Match, is_at_startup: bool) -> bool {
+fn mapped_matches(mapped: &Mapped, m: &Match, is_at_startup: bool) -> bool {
     if let Some(at_startup) = m.at_startup {
         if at_startup != is_at_startup {
             return false;

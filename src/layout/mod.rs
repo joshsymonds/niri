@@ -827,21 +827,28 @@ impl<W: LayoutElement> Layout<W> {
         self.floating_anchors.target_of(dependent)
     }
 
-    /// Locate a window's `(WorkspaceId, Option<&Output>, index_within_monitor)`
-    /// in a single monitor-set walk. `Option<&Output>` is `None` only for
-    /// the `NoOutputs` monitor-set case; in that case `index_within_monitor`
-    /// is `0` and meaningless. Used at dialog-map time (compositor.rs hook)
-    /// and on every anchor sweep / notify path.
+    /// Locate a window's `(WorkspaceId, Option<&Output>, mon_idx, ws_idx)`
+    /// in a single monitor-set walk. For `NoOutputs`, `Option<&Output>` is
+    /// `None`, `mon_idx` is `0` and meaningless, and `ws_idx` is the
+    /// workspace index in the `workspaces` Vec. Used at dialog-map time
+    /// (compositor.rs hook) and on every anchor sweep / notify path.
+    ///
+    /// `mon_idx` is returned alongside `ws_idx` so callers needing to pass
+    /// the indices into [`Self::move_to_output_with_source`] don't pay for
+    /// a second monitor-set walk. The output reference is provided for
+    /// callers that need the output (e.g. compositor.rs reading its name);
+    /// when holding `&Output` across a `&mut self` call, clone first to
+    /// release the borrow.
     pub fn find_window_position_by_id(
         &self,
         id: &W::Id,
-    ) -> Option<(WorkspaceId, Option<&Output>, usize)> {
+    ) -> Option<(WorkspaceId, Option<&Output>, usize, usize)> {
         match &self.monitor_set {
             MonitorSet::Normal { monitors, .. } => {
-                for monitor in monitors {
-                    for (idx, ws) in monitor.workspaces.iter().enumerate() {
+                for (mon_idx, monitor) in monitors.iter().enumerate() {
+                    for (ws_idx, ws) in monitor.workspaces.iter().enumerate() {
                         if ws.has_window(id) {
-                            return Some((ws.id(), Some(monitor.output()), idx));
+                            return Some((ws.id(), Some(monitor.output()), mon_idx, ws_idx));
                         }
                     }
                 }
@@ -849,8 +856,9 @@ impl<W: LayoutElement> Layout<W> {
             }
             MonitorSet::NoOutputs { workspaces } => workspaces
                 .iter()
-                .find(|ws| ws.has_window(id))
-                .map(|ws| (ws.id(), None, 0)),
+                .enumerate()
+                .find(|(_, ws)| ws.has_window(id))
+                .map(|(ws_idx, ws)| (ws.id(), None, 0, ws_idx)),
         }
     }
 
@@ -910,10 +918,9 @@ impl<W: LayoutElement> Layout<W> {
         // location variant. Callers like the per-frame sweep that already
         // have the position should call `notify_tile_changed_with_location`
         // directly to avoid this second monitor-set walk.
-        let Some((ws_id, output, idx)) = self
-            .find_window_position_by_id(target_id)
-            .and_then(|(ws_id, output, idx)| output.map(|o| (ws_id, o.clone(), idx)))
-        else {
+        let Some((ws_id, output, idx)) = self.find_window_position_by_id(target_id).and_then(
+            |(ws_id, output, _mon_idx, ws_idx)| output.map(|o| (ws_id, o.clone(), ws_idx)),
+        ) else {
             // NoOutputs or unknown id: nothing to migrate against. Still
             // refresh the cache below if there are no dependents — we'll
             // do that inside the with-location variant's no-dependents
@@ -953,8 +960,13 @@ impl<W: LayoutElement> Layout<W> {
             // Look up the dependent's current workspace fresh each event.
             // Cheap at notify frequency and avoids the staleness class of
             // bugs where a cached entry diverged from reality because some
-            // non-anchor code path migrated the dependent.
-            let Some((dep_ws_id, _, _)) = self.find_window_position_by_id(dependent) else {
+            // non-anchor code path migrated the dependent. We capture the
+            // (mon_idx, ws_idx) indices alongside the workspace id so the
+            // subsequent `move_to_output_with_source` call skips its own
+            // monitor-set walk.
+            let Some((dep_ws_id, _, dep_mon_idx, dep_ws_idx)) =
+                self.find_window_position_by_id(dependent)
+            else {
                 continue;
             };
 
@@ -972,7 +984,8 @@ impl<W: LayoutElement> Layout<W> {
             // target's activation. If the user instead drags the dependent
             // itself, Smart activates the new output.
             let final_ws_id = if dep_ws_id != target_ws_id {
-                self.move_to_output(
+                self.move_to_output_with_source(
+                    Some((dep_mon_idx, dep_ws_idx)),
                     Some(dependent),
                     target_output,
                     Some(target_ws_idx),
@@ -3742,6 +3755,24 @@ impl<W: LayoutElement> Layout<W> {
         target_ws_idx: Option<usize>,
         activate: ActivateWindow,
     ) {
+        self.move_to_output_with_source(None, window, output, target_ws_idx, activate);
+    }
+
+    /// `move_to_output` variant that lets the caller skip the source
+    /// `(mon_idx, ws_idx)` lookup. The cross-window anchor sweep already
+    /// resolves the dependent's position via `find_window_position_by_id`
+    /// before calling this; passing the indices through saves a redundant
+    /// O(monitors × workspaces × tiles) walk per dependent migration.
+    /// External callers use the public `move_to_output` which passes `None`
+    /// and falls back to the original behavior.
+    fn move_to_output_with_source(
+        &mut self,
+        source_hint: Option<(usize, usize)>,
+        window: Option<&W::Id>,
+        output: &Output,
+        target_ws_idx: Option<usize>,
+        activate: ActivateWindow,
+    ) {
         if let Some(InteractiveMoveState::Moving(move_)) = &mut self.interactive_move {
             if window.is_none() || window == Some(move_.tile.window().id()) {
                 return;
@@ -3759,7 +3790,9 @@ impl<W: LayoutElement> Layout<W> {
                 .position(|mon| &mon.output == output)
                 .unwrap();
 
-            let (mon_idx, ws_idx) = if let Some(window) = window {
+            let (mon_idx, ws_idx) = if let Some(hint) = source_hint {
+                hint
+            } else if let Some(window) = window {
                 monitors
                     .iter()
                     .enumerate()

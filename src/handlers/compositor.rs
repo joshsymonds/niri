@@ -247,7 +247,7 @@ impl CompositorHandler for State {
                     // the dependent is in the layout and we can read its
                     // workspace/output) and register the relationship.
                     if let Some(target_match) = anchor_target_match {
-                        if let Some((ws_id, dep_output, _idx)) = self
+                        if let Some((ws_id, dep_output, _mon_idx, _ws_idx)) = self
                             .niri
                             .layout
                             .find_window_position_by_id(&anchor_dependent_window)
