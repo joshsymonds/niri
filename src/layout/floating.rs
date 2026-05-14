@@ -469,11 +469,9 @@ impl<W: LayoutElement> FloatingSpace<W> {
             }
         }
 
-        let pos = self
-            .stored_or_default_tile_pos(&tile, None)
-            .unwrap_or_else(|| {
-                center_preferring_top_left_in_area(self.working_area, tile.tile_size())
-            });
+        let pos = self.stored_or_default_tile_pos(&tile).unwrap_or_else(|| {
+            center_preferring_top_left_in_area(self.working_area, tile.tile_size())
+        });
 
         let data = Data::new(self.working_area, &tile, pos);
         self.data.insert(idx, data);
@@ -1298,21 +1296,14 @@ impl<W: LayoutElement> FloatingSpace<W> {
         Size::from((width, height))
     }
 
-    pub fn stored_or_default_tile_pos(
-        &self,
-        tile: &Tile<W>,
-        reference_override: Option<Rectangle<f64, Logical>>,
-    ) -> Option<Point<f64, Logical>> {
+    pub fn stored_or_default_tile_pos(&self, tile: &Tile<W>) -> Option<Point<f64, Logical>> {
         let pos = tile.floating_pos.map(|pos| self.scale_by_working_area(pos));
         pos.or_else(|| {
             tile.window()
                 .rules()
                 .default_floating_position
                 .as_ref()
-                .map(|rule| {
-                    let reference = reference_override.unwrap_or(self.working_area);
-                    compute_anchor_position(rule, reference, tile.tile_size())
-                })
+                .map(|rule| compute_anchor_position(rule, self.working_area, tile.tile_size()))
         })
     }
 
