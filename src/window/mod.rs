@@ -471,28 +471,36 @@ pub fn mapped_matches(mapped: &Mapped, m: &Match, is_at_startup: bool) -> bool {
 /// [`TargetCandidate`]. The result feeds [`resolve_target`] which applies the
 /// layered filter (same-workspace → same-output → MRU).
 ///
+/// Returns `Option<Window>` — the smithay `Window` is `<Mapped as
+/// LayoutElement>::Id`, which is what `Layout::register_floating_anchor` and
+/// the rest of the layout-level anchor API are keyed on.
+///
 /// This is the only entry point a caller (e.g. dialog-map handler) needs:
 /// `Some(target_id)` to anchor, `None` to fall back to working-area positioning.
 pub fn resolve_position_frame_target(
     layout: &crate::layout::Layout<Mapped>,
     target: &Match,
-    dependent_id: mapped::MappedId,
+    dependent_id: &smithay::desktop::Window,
     dependent_workspace_id: crate::layout::workspace::WorkspaceId,
     dependent_output_name: Option<&str>,
     is_at_startup: bool,
-) -> Option<mapped::MappedId> {
+) -> Option<smithay::desktop::Window> {
     let candidates = layout.workspaces().flat_map(|(monitor, _, workspace)| {
         let workspace_id = workspace.id();
         let output_name = monitor.map(|m| m.output_name().clone());
         workspace.windows().filter_map(move |mapped| {
-            if mapped.id() == dependent_id {
+            // Use the LayoutElement::Id (the smithay Window) for both the
+            // dependent-skip check and the resulting TargetCandidate so the
+            // key type matches the anchor index.
+            let window_id = <Mapped as crate::layout::LayoutElement>::id(mapped).clone();
+            if &window_id == dependent_id {
                 return None;
             }
             if !mapped_matches(mapped, target, is_at_startup) {
                 return None;
             }
             Some(TargetCandidate {
-                id: mapped.id(),
+                id: window_id,
                 workspace_id,
                 output_name: output_name.clone(),
                 focus_timestamp: mapped.get_focus_timestamp(),
@@ -506,12 +514,16 @@ pub fn resolve_position_frame_target(
 /// positioning target resolver. Constructed by [`resolve_position_frame_target`]
 /// when iterating mapped windows; consumed by [`resolve_target`].
 ///
+/// Generic on the id type so the pure resolver is testable with simple values
+/// (e.g. `u32`) while production `Layout<Mapped>` carries `Window` (smithay's
+/// `LayoutElement::Id` for `Mapped`).
+///
 /// Owning `output_name` (rather than borrowing) keeps the resolver decoupled
 /// from `Layout`'s lifetimes — the resolver is a pure function that can be
 /// tested without any layout fixture.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TargetCandidate {
-    pub id: mapped::MappedId,
+pub struct TargetCandidate<Id> {
+    pub id: Id,
     pub workspace_id: crate::layout::workspace::WorkspaceId,
     /// `None` for the `NoOutputs` monitor-set case (workspaces with no
     /// associated output).
@@ -533,18 +545,22 @@ pub struct TargetCandidate {
 /// Ordering of ties: when multiple candidates compare equal under the MRU
 /// rule (including the "all `None` timestamps" case), iteration order wins
 /// (first-seen is kept).
-pub fn resolve_target<I: IntoIterator<Item = TargetCandidate>>(
+pub fn resolve_target<Id, I>(
     candidates: I,
     dependent_workspace_id: crate::layout::workspace::WorkspaceId,
     dependent_output_name: Option<&str>,
-) -> Option<mapped::MappedId> {
-    let all: Vec<TargetCandidate> = candidates.into_iter().collect();
+) -> Option<Id>
+where
+    Id: Clone,
+    I: IntoIterator<Item = TargetCandidate<Id>>,
+{
+    let all: Vec<TargetCandidate<Id>> = candidates.into_iter().collect();
     if all.is_empty() {
         return None;
     }
 
     // Layer 1: same workspace.
-    let by_workspace: Vec<TargetCandidate> = all
+    let by_workspace: Vec<TargetCandidate<Id>> = all
         .iter()
         .filter(|c| c.workspace_id == dependent_workspace_id)
         .cloned()
@@ -554,7 +570,7 @@ pub fn resolve_target<I: IntoIterator<Item = TargetCandidate>>(
     }
 
     // Layer 2: same output.
-    let by_output: Vec<TargetCandidate> = all
+    let by_output: Vec<TargetCandidate<Id>> = all
         .iter()
         .filter(|c| c.output_name.as_deref() == dependent_output_name)
         .cloned()
@@ -567,8 +583,11 @@ pub fn resolve_target<I: IntoIterator<Item = TargetCandidate>>(
     pick_mru(all)
 }
 
-fn pick_mru<I: IntoIterator<Item = TargetCandidate>>(it: I) -> Option<mapped::MappedId> {
-    let mut best: Option<TargetCandidate> = None;
+fn pick_mru<Id, I>(it: I) -> Option<Id>
+where
+    I: IntoIterator<Item = TargetCandidate<Id>>,
+{
+    let mut best: Option<TargetCandidate<Id>> = None;
     for c in it {
         let beats = match best.as_ref() {
             None => true,
@@ -587,15 +606,20 @@ fn pick_mru<I: IntoIterator<Item = TargetCandidate>>(it: I) -> Option<mapped::Ma
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicU32, Ordering};
     use std::time::Duration;
 
     use super::*;
     use crate::layout::workspace::WorkspaceId;
-    use crate::window::mapped::MappedId;
 
-    fn cand(ws: u64, output: Option<&str>, ts_micros: Option<u64>) -> TargetCandidate {
+    /// Source of unique ids for tests; each `cand` call burns one. The id
+    /// type is just `u32` — the resolver is generic, so the production
+    /// `Window` type isn't needed for testing.
+    static NEXT_TEST_ID: AtomicU32 = AtomicU32::new(1);
+
+    fn cand(ws: u64, output: Option<&str>, ts_micros: Option<u64>) -> TargetCandidate<u32> {
         TargetCandidate {
-            id: MappedId::next(),
+            id: NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed),
             workspace_id: WorkspaceId::specific(ws),
             output_name: output.map(str::to_owned),
             focus_timestamp: ts_micros.map(Duration::from_micros),
@@ -605,7 +629,7 @@ mod tests {
     #[test]
     fn resolve_target_no_candidates_returns_none() {
         let result = resolve_target(
-            Vec::<TargetCandidate>::new(),
+            Vec::<TargetCandidate<u32>>::new(),
             WorkspaceId::specific(1),
             Some("DP-1"),
         );
