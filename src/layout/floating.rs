@@ -1430,10 +1430,16 @@ pub fn compute_anchor_position(
     ) {
         pos.y = reference.size.h - tile_size.h - pos.y;
     }
-    if matches!(relative_to, RelativeTo::Top | RelativeTo::Bottom) {
+    if matches!(
+        relative_to,
+        RelativeTo::Top | RelativeTo::Bottom | RelativeTo::Center
+    ) {
         pos.x += reference.size.w / 2.0 - tile_size.w / 2.0
     }
-    if matches!(relative_to, RelativeTo::Left | RelativeTo::Right) {
+    if matches!(
+        relative_to,
+        RelativeTo::Left | RelativeTo::Right | RelativeTo::Center
+    ) {
         pos.y += reference.size.h / 2.0 - tile_size.h / 2.0
     }
     pos + reference.loc
@@ -1566,5 +1572,40 @@ mod anchor_position_tests {
         let pos_offset = compute_anchor_position(&r, offset_origin, Size::from((10.0, 10.0)));
         assert_eq!(pos_zero, Point::from((0.0, 0.0)));
         assert_eq!(pos_offset, Point::from((777.0, 333.0)));
+    }
+
+    // -- Center variant must compose correctly with the cross-window
+    //    reference-frame parameterization. Regression for review C1/C18: when
+    //    `josh/floating-position-center` (which adds Center) and
+    //    `josh/relative-to-window-config` (which extracts compute_anchor_position)
+    //    merge into integration, Center must center on BOTH axes through
+    //    compute_anchor_position — not fall through to a TopLeft-equivalent path.
+
+    #[test]
+    fn center_zero_offset_centers_on_both_axes_in_working_area() {
+        let r = rule(0.0, 0.0, RelativeTo::Center);
+        let pos = compute_anchor_position(&r, working_area_2560x1440(), tile_250x52());
+        // (2560 - 250) / 2 = 1155; (1440 - 52) / 2 = 694
+        assert_eq!(pos, Point::from((1155.0, 694.0)));
+    }
+
+    #[test]
+    fn center_with_offset_applies_offset_after_centering() {
+        let r = rule(100.0, -50.0, RelativeTo::Center);
+        let pos = compute_anchor_position(&r, working_area_2560x1440(), tile_250x52());
+        // 1155 + 100 = 1255; 694 + (-50) = 644
+        assert_eq!(pos, Point::from((1255.0, 644.0)));
+    }
+
+    #[test]
+    fn center_inside_offset_reference_rect() {
+        // Anchor inside a non-square target tile at a non-zero origin — the
+        // cross-window-positioning case Center is most useful for.
+        let reference = Rectangle::new(Point::from((1000.0, 500.0)), Size::from((1252.0, 1432.0)));
+        let r = rule(0.0, 0.0, RelativeTo::Center);
+        let pos = compute_anchor_position(&r, reference, tile_250x52());
+        // x = 1000 + (1252 - 250) / 2 = 1000 + 501 = 1501
+        // y = 500  + (1432 -  52) / 2 = 500  + 690 = 1190
+        assert_eq!(pos, Point::from((1501.0, 1190.0)));
     }
 }
