@@ -1276,33 +1276,37 @@ impl<W: LayoutElement> FloatingSpace<W> {
     pub fn stored_or_default_tile_pos(&self, tile: &Tile<W>) -> Option<Point<f64, Logical>> {
         let pos = tile.floating_pos.map(|pos| self.scale_by_working_area(pos));
         pos.or_else(|| {
-            tile.window().rules().default_floating_position.map(|pos| {
-                let relative_to = pos.relative_to;
-                let size = tile.tile_size();
-                let area = self.working_area;
+            tile.window()
+                .rules()
+                .default_floating_position
+                .as_ref()
+                .map(|pos| {
+                    let relative_to = pos.relative_to;
+                    let size = tile.tile_size();
+                    let area = self.working_area;
 
-                let mut pos = Point::from((pos.x.0, pos.y.0));
-                if relative_to == RelativeTo::TopRight
-                    || relative_to == RelativeTo::BottomRight
-                    || relative_to == RelativeTo::Right
-                {
-                    pos.x = area.size.w - size.w - pos.x;
-                }
-                if relative_to == RelativeTo::BottomLeft
-                    || relative_to == RelativeTo::BottomRight
-                    || relative_to == RelativeTo::Bottom
-                {
-                    pos.y = area.size.h - size.h - pos.y;
-                }
-                if relative_to == RelativeTo::Top || relative_to == RelativeTo::Bottom {
-                    pos.x += area.size.w / 2.0 - size.w / 2.0
-                }
-                if relative_to == RelativeTo::Left || relative_to == RelativeTo::Right {
-                    pos.y += area.size.h / 2.0 - size.h / 2.0
-                }
+                    let mut pos = Point::from((pos.x.0, pos.y.0));
+                    if relative_to == RelativeTo::TopRight
+                        || relative_to == RelativeTo::BottomRight
+                        || relative_to == RelativeTo::Right
+                    {
+                        pos.x = area.size.w - size.w - pos.x;
+                    }
+                    if relative_to == RelativeTo::BottomLeft
+                        || relative_to == RelativeTo::BottomRight
+                        || relative_to == RelativeTo::Bottom
+                    {
+                        pos.y = area.size.h - size.h - pos.y;
+                    }
+                    if relative_to == RelativeTo::Top || relative_to == RelativeTo::Bottom {
+                        pos.x += area.size.w / 2.0 - size.w / 2.0
+                    }
+                    if relative_to == RelativeTo::Left || relative_to == RelativeTo::Right {
+                        pos.y += area.size.h / 2.0 - size.h / 2.0
+                    }
 
-                pos + self.working_area.loc
-            })
+                    pos + self.working_area.loc
+                })
         })
     }
 
