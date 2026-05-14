@@ -173,11 +173,6 @@ impl<Id: Eq + Hash + Clone + Debug> AnchorIndex<Id> {
         self.reverse.get(target).into_iter().flatten()
     }
 
-    /// True if `dependent` has any registered target.
-    pub fn is_registered(&self, dependent: &Id) -> bool {
-        self.forward.contains_key(dependent)
-    }
-
     /// True if `target` has at least one dependent (i.e. is the value of some
     /// forward entry). Used by [`crate::layout::Layout::unregister_floating_anchor`]
     /// to decide whether to prune cached target state when the last dependent
@@ -191,11 +186,6 @@ impl<Id: Eq + Hash + Clone + Debug> AnchorIndex<Id> {
     /// touching any sweep state.
     pub fn is_empty(&self) -> bool {
         self.forward.is_empty()
-    }
-
-    /// Iterate every registered dependent (every id with a target).
-    pub fn dependents_iter(&self) -> impl Iterator<Item = &Id> + '_ {
-        self.forward.keys()
     }
 
     /// Iterate the UNIQUE set of targets (reverse-map keys) — every id with

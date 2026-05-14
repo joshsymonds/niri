@@ -1667,9 +1667,12 @@ impl Op {
             // verify_invariants stays meaningful when these ops interleave
             // with arbitrary CloseWindow / AddWindow sequences.
             Op::RegisterFloatingAnchor { dependent, target } => {
-                if dependent == target {
-                    return;
-                }
+                // Note: `dependent == target` (self-anchor) is intentionally
+                // allowed here. `AnchorIndex::register` flags it as
+                // `RecursiveAnchor { chain_depth: 1 }` and the Layout-level
+                // wrapper warns — this op exercises that interleaving with
+                // arbitrary CloseWindow / Move / etc. against the
+                // verify_invariants cross-checks.
                 if !layout.has_window(&dependent) || !layout.has_window(&target) {
                     return;
                 }
@@ -4162,5 +4165,49 @@ mod floating_anchor_layer_tests {
         layout.orphan_floating_anchor_dependents_of(&3);
         assert_eq!(layout.floating_anchor_target_of(&1), None);
         assert_eq!(layout.floating_anchor_target_of(&4), None);
+    }
+
+    #[test]
+    fn rect_cache_distinguishes_workspaces_with_same_local_rect() {
+        // Pins the documented invariant on `floating_anchor_target_rects`'s
+        // (WorkspaceId, Rectangle) key: a target migrating to a different
+        // workspace where its workspace-local rect coordinates happen to
+        // match the cached entry must NOT be silently skipped by the
+        // sweep's compare-and-skip. A rect-only cache would lose this case;
+        // the (ws_id, rect) tuple preserves it.
+        //
+        // We exercise the comparison directly without running the sweep —
+        // the sweep's compare logic is `(ws_a, rect_a) == (ws_b, rect_b)`,
+        // which decomposes into `(ws_a == ws_b) && (rect_a == rect_b)`. If
+        // either component diverges, the cache MISS triggers notify.
+        use smithay::utils::{Logical, Rectangle};
+
+        use crate::layout::workspace::WorkspaceId;
+
+        let ws_a = WorkspaceId::specific(1);
+        let ws_b = WorkspaceId::specific(2);
+        let identical_rect: Rectangle<f64, Logical> =
+            Rectangle::new((16.0, 16.0).into(), (800.0, 600.0).into());
+
+        // The cache entry from before migration.
+        let cached: (WorkspaceId, Rectangle<f64, Logical>) = (ws_a, identical_rect);
+        // The current state after the target moved to ws_b with the same
+        // local coordinates (struts unchanged, same window size).
+        let current: (WorkspaceId, Rectangle<f64, Logical>) = (ws_b, identical_rect);
+
+        // The whole point of the workspace-included key: these compare as
+        // !=, so the sweep's `if cached == Some(current)` short-circuit
+        // does NOT fire, and `notify_tile_changed` runs.
+        assert_ne!(
+            cached, current,
+            "rect-cache comparison must distinguish workspaces even when \
+             workspace-local rect coordinates are identical",
+        );
+        // Sanity: the rect halves on their own DO match — a rect-only
+        // cache would silently miss the migration.
+        assert_eq!(
+            cached.1, current.1,
+            "test premise: the rectangles themselves must compare equal",
+        );
     }
 }

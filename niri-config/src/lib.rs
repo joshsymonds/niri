@@ -2415,6 +2415,29 @@ mod tests {
     }
 
     #[test]
+    fn parse_relative_to_center() {
+        // Pins `relative-to="center"` to the `RelativeTo::Center` variant
+        // at the parser layer. The Center variant participates in
+        // `compute_anchor_position`'s math (both x and y center) and is
+        // exercised end-to-end by the
+        // `dialog_opens_centered_on_target_via_relative_to_center`
+        // integration test; this test catches `knuffel::DecodeScalar`
+        // regressions that would silently fail to parse the variant.
+        let config = do_parse(
+            r##"
+            window-rule {
+                default-floating-position x=0 y=0 relative-to="center"
+            }
+            "##,
+        );
+        let pos = config.window_rules[0]
+            .default_floating_position
+            .as_ref()
+            .expect("default-floating-position should have parsed");
+        assert_eq!(pos.relative_to, RelativeTo::Center);
+    }
+
+    #[test]
     fn parse_in_window_of_with_app_id() {
         let config = do_parse(
             r##"

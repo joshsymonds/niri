@@ -1991,14 +1991,17 @@ impl<W: LayoutElement> Workspace<W> {
     /// reference for its `default_floating_position` rule. Forwards to
     /// `FloatingSpace::reposition_anchored`. No-op if the id isn't in the
     /// floating set.
+    ///
+    /// `reposition_anchored` is itself a no-op when `id` isn't in the
+    /// floating set (it returns early on the `tiles.iter().position(...)`
+    /// lookup), so we don't need a separate `has_window` guard — that
+    /// would just walk the tile list a second time.
     pub fn reposition_floating_anchored(
         &mut self,
         id: &W::Id,
         target_rect: Rectangle<f64, Logical>,
     ) {
-        if self.floating.has_window(id) {
-            self.floating.reposition_anchored(id, target_rect);
-        }
+        self.floating.reposition_anchored(id, target_rect);
     }
 
     #[cfg(test)]

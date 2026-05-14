@@ -32,7 +32,7 @@ use std::fmt::Write as _;
 use client::ClientId;
 use insta::assert_snapshot;
 use niri_config::Config;
-use smithay::utils::{Point, Size};
+use smithay::utils::{Logical, Point, Size};
 use wayland_client::protocol::wl_surface::WlSurface;
 
 use super::client::Window as ClientWindow;
@@ -255,6 +255,11 @@ fn dependent_orphaned_when_target_closes_keeps_last_position() {
     let target_id = window_id_for_title(f.niri(), "target");
     let dialog_id = window_id_for_title(f.niri(), "dialog");
 
+    // Capture the dialog's render position BEFORE the target closes so we
+    // can verify it actually stays at its last position — that's the
+    // load-bearing property of "keeps last position" in the test name.
+    let dialog_pos_before = dialog_render_pos(f.niri(), &dialog_id);
+
     // Destroy the target client-side and roundtrip so the compositor sees
     // the unmap. The compositor's unmap hook calls
     // orphan_floating_anchor_dependents_of(target), clearing the dialog's
@@ -284,7 +289,29 @@ fn dependent_orphaned_when_target_closes_keeps_last_position() {
         !window_is_mapped(f.niri(), &target_id),
         "target should be unmapped after attach_null + commit",
     );
+
+    // Position preservation: orphaning must leave the dialog exactly where
+    // it was. A regression where orphan silently teleports the dialog
+    // (e.g. clears `floating_pos` and falls back to working-area-center)
+    // would only show up in this assertion, not in the anchor=None check.
+    let dialog_pos_after = dialog_render_pos(f.niri(), &dialog_id);
+    assert_eq!(
+        dialog_pos_after, dialog_pos_before,
+        "orphaned dialog must stay at its last computed position",
+    );
     let _ = dialog;
+}
+
+/// Find the dialog's render position by id. Panics if not mapped — callers
+/// should verify mapped state separately.
+fn dialog_render_pos(niri: &Niri, id: &smithay::desktop::Window) -> Point<f64, Logical> {
+    let ws = niri.layout.active_workspace().unwrap();
+    for (tile, pos, _visible) in ws.tiles_with_render_positions() {
+        if &tile.window().window == id {
+            return pos;
+        }
+    }
+    panic!("window {id:?} not mapped on active workspace");
 }
 
 #[test]
@@ -511,13 +538,13 @@ fn dependent_follows_target_across_workspaces() {
         .niri()
         .layout
         .find_window_position_by_id(&target_id)
-        .map(|(ws_id, _, _)| ws_id)
+        .map(|(ws_id, _, _, _)| ws_id)
         .expect("target should be locatable after migration");
     let dialog_ws = f
         .niri()
         .layout
         .find_window_position_by_id(&dialog_id)
-        .map(|(ws_id, _, _)| ws_id)
+        .map(|(ws_id, _, _, _)| ws_id)
         .expect("dialog should be locatable after migration");
     assert_eq!(
         target_ws, dialog_ws,
@@ -552,7 +579,7 @@ fn dependent_follows_target_across_outputs() {
     let dialog_id = window_id_for_title(f.niri(), "dialog");
 
     // Sanity: both windows located on output 1's workspace.
-    let (_, target_output_pre, _) = f
+    let (_, target_output_pre, _, _) = f
         .niri()
         .layout
         .find_window_position_by_id(&target_id)
@@ -580,7 +607,7 @@ fn dependent_follows_target_across_outputs() {
     f.niri_complete_animations();
 
     // Target is on output 2.
-    let (_, target_output_post, _) = f
+    let (_, target_output_post, _, _) = f
         .niri()
         .layout
         .find_window_position_by_id(&target_id)
@@ -595,7 +622,7 @@ fn dependent_follows_target_across_outputs() {
     );
 
     // Dialog must have followed.
-    let (_, dialog_output_post, _) = f
+    let (_, dialog_output_post, _, _) = f
         .niri()
         .layout
         .find_window_position_by_id(&dialog_id)
@@ -708,14 +735,14 @@ fn many_dependents_anchored_to_same_target_migrate_together() {
         .niri()
         .layout
         .find_window_position_by_id(&target_id)
-        .map(|(ws_id, _, _)| ws_id)
+        .map(|(ws_id, _, _, _)| ws_id)
         .expect("target locatable post-migration");
     for dep in &dialog_ids {
         let dep_ws = f
             .niri()
             .layout
             .find_window_position_by_id(dep)
-            .map(|(ws_id, _, _)| ws_id)
+            .map(|(ws_id, _, _, _)| ws_id)
             .expect("dependent locatable post-migration");
         assert_eq!(
             dep_ws, target_ws,
