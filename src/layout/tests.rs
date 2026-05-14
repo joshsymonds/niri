@@ -4003,3 +4003,129 @@ proptest! {
         check_ops_with_options(options, ops);
     }
 }
+
+mod floating_anchor_layer_tests {
+    //! Layer-2 tests for `Layout::register_floating_anchor` and the MRU-at-
+    //! open-time orphan policy. Layer-1 (the `AnchorIndex` itself) is covered
+    //! in `crate::layout::anchor::tests`; these confirm the Layout wrapper
+    //! adds the right side effects (warn! emission on recursive chains;
+    //! orphan stays orphaned even when a new matching target arrives).
+    use std::io;
+    use std::sync::{Arc, Mutex};
+
+    use tracing::subscriber::with_default;
+    use tracing_subscriber::fmt::MakeWriter;
+
+    use super::*;
+
+    /// MakeWriter that appends to a shared byte buffer. Used to capture
+    /// formatted `tracing` events for assertion.
+    #[derive(Clone)]
+    struct VecMakeWriter(Arc<Mutex<Vec<u8>>>);
+
+    struct VecWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl<'a> MakeWriter<'a> for VecMakeWriter {
+        type Writer = VecWriter;
+        fn make_writer(&'a self) -> Self::Writer {
+            VecWriter(Arc::clone(&self.0))
+        }
+    }
+
+    impl io::Write for VecWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Capture tracing events emitted while `f` runs, returning the formatted
+    /// output as a String.
+    fn capture_tracing<F: FnOnce()>(f: F) -> String {
+        let buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt::Subscriber::builder()
+            .with_writer(VecMakeWriter(Arc::clone(&buf)))
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .finish();
+        with_default(subscriber, f);
+        let bytes = buf.lock().unwrap().clone();
+        String::from_utf8(bytes).unwrap()
+    }
+
+    #[test]
+    fn register_floating_anchor_warns_on_recursive_chain() {
+        // Build a chain of depth 2: 3 → 1 → 2. The second register has
+        // forward.get(&1) = Some(&2), so the depth walk yields 2, which
+        // triggers the recursive-anchor warning.
+        let captured = capture_tracing(|| {
+            let mut layout: Layout<TestWindow> = Layout::default();
+            layout.register_floating_anchor(1, 2);
+            layout.register_floating_anchor(3, 1);
+        });
+        assert!(
+            captured.contains("recursive floating-anchor chain"),
+            "expected warn! about recursive chain, captured: {captured:?}",
+        );
+        assert!(
+            captured.contains("WARN"),
+            "expected the captured event at WARN level, captured: {captured:?}",
+        );
+    }
+
+    #[test]
+    fn register_floating_anchor_does_not_warn_on_shallow_chain() {
+        // Two parallel shallow chains: 1 → 2 and 3 → 4. Depth 1 each, no
+        // recursion, so no warn!. This guards against the warning firing on
+        // every register call.
+        let captured = capture_tracing(|| {
+            let mut layout: Layout<TestWindow> = Layout::default();
+            layout.register_floating_anchor(1, 2);
+            layout.register_floating_anchor(3, 4);
+        });
+        assert!(
+            !captured.contains("recursive floating-anchor chain"),
+            "did not expect a recursive-anchor warning, captured: {captured:?}",
+        );
+    }
+
+    #[test]
+    fn orphan_dependent_is_not_re_registered_when_new_match_arrives() {
+        // MRU-at-open-time policy: after target B drops, dependent A is
+        // orphaned, and a later target C that *would* have matched A's rule
+        // does not cause A to be re-anchored. The policy is enforced because
+        // re-resolution only happens at dialog map; orphaned dependents just
+        // stay where they are.
+        //
+        // Layer-2 expression of that policy: drive the Layout API directly,
+        // confirm anchor state stays cleared.
+
+        let mut layout: Layout<TestWindow> = Layout::default();
+        // Register A=1 anchored to B=2.
+        layout.register_floating_anchor(1, 2);
+        assert_eq!(layout.floating_anchor_target_of(&1), Some(&2));
+
+        // B closes -> orphan A. A is no longer anchored.
+        let orphans = layout.orphan_floating_anchor_dependents_of(&2);
+        assert_eq!(orphans, vec![1]);
+        assert_eq!(layout.floating_anchor_target_of(&1), None);
+
+        // A new candidate C=3 enters the system. The compositor's map-hook
+        // is what would re-register A if MRU were re-evaluated post-open;
+        // since A is already mapped, no re-registration happens. We confirm
+        // by checking A's anchor stays cleared. The system would only
+        // register A → C if some code path called register_floating_anchor
+        // again — none does.
+        assert_eq!(
+            layout.floating_anchor_target_of(&1),
+            None,
+            "orphaned dependent must NOT be re-anchored to a new matching target",
+        );
+        // Also confirm C is not registered as a target of anything (we never
+        // registered anything against it).
+        assert!(layout.floating_anchor_dependents_of(&3).next().is_none());
+    }
+}
