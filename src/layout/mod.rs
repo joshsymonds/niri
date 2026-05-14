@@ -374,10 +374,24 @@ pub struct Layout<W: LayoutElement> {
     options: Rc<Options>,
     /// Cross-window anchor relationships introduced by `PositionFrame::Window`.
     /// Populated at dialog-map time when the resolver returns a target;
-    /// consulted by the geometry-changed handler to find dependents in O(1).
+    /// consulted by [`Self::notify_tile_changed`] to find dependents in O(1).
     /// Cleared on dialog close and on target close (the latter orphans the
     /// dependent without re-resolving — per the MRU-at-open-time policy).
     floating_anchors: anchor::AnchorIndex<W::Id>,
+    /// Per-dependent cached workspace lookup. Maintained in lockstep with
+    /// `floating_anchors`'s forward map: populated at registration so the
+    /// reposition hot path avoids the O(workspaces × tiles) scan, cleared on
+    /// unregister or orphan. Workspace migrations (e.g. dependent moves to
+    /// another workspace) update this entry; if it's stale on lookup the
+    /// reposition silently no-ops rather than mis-targeting.
+    floating_anchor_dependent_workspaces: HashMap<W::Id, WorkspaceId>,
+    /// Per-target last-seen rect cache. Filled by [`Self::notify_tile_changed`]
+    /// on each event; the sweep in [`Self::resweep_all_anchor_dependents`]
+    /// compares the current rect to this cache to skip repositioning targets
+    /// that haven't moved. Without this cache the sweep would re-place every
+    /// dependent on every animation frame regardless of whether the target
+    /// actually moved.
+    floating_anchor_target_rects: HashMap<W::Id, Rectangle<f64, Logical>>,
 }
 
 #[derive(Debug)]
@@ -717,6 +731,8 @@ impl<W: LayoutElement> Layout<W> {
             overview_progress: None,
             options: Rc::new(options),
             floating_anchors: anchor::AnchorIndex::new(),
+            floating_anchor_dependent_workspaces: HashMap::new(),
+            floating_anchor_target_rects: HashMap::new(),
         }
     }
 
@@ -743,12 +759,15 @@ impl<W: LayoutElement> Layout<W> {
             overview_progress: None,
             options: opts,
             floating_anchors: anchor::AnchorIndex::new(),
+            floating_anchor_dependent_workspaces: HashMap::new(),
+            floating_anchor_target_rects: HashMap::new(),
         }
     }
 
     /// Register `dependent` as anchored to `target` for cross-window
-    /// positioning. Emits `warn!` if the resulting chain is recursive
-    /// (target itself is anchored). See `anchor::AnchorIndex` for details.
+    /// positioning. Caches `dependent`'s current workspace and `target`'s
+    /// current rect so subsequent re-position events can skip the O(N) tile
+    /// scan. Emits `warn!` if the resulting chain is recursive.
     pub fn register_floating_anchor(&mut self, dependent: W::Id, target: W::Id) {
         let outcome = self
             .floating_anchors
@@ -759,11 +778,20 @@ impl<W: LayoutElement> Layout<W> {
                 chain_depth, dependent, target,
             );
         }
+        // Populate caches so the hot path can avoid the workspace scan.
+        if let Some((ws_id, _)) = self.find_workspace_and_output_by_id(&dependent) {
+            self.floating_anchor_dependent_workspaces
+                .insert(dependent, ws_id);
+        }
+        if let Some(rect) = self.tile_visual_rect(&target) {
+            self.floating_anchor_target_rects.insert(target, rect);
+        }
     }
 
     /// Drop `dependent`'s anchor registration. Call on dialog close.
     pub fn unregister_floating_anchor(&mut self, dependent: &W::Id) {
         self.floating_anchors.unregister(dependent);
+        self.floating_anchor_dependent_workspaces.remove(dependent);
     }
 
     /// `target` is closing — return its dependents (callers will need to
@@ -771,7 +799,14 @@ impl<W: LayoutElement> Layout<W> {
     /// drop them from the anchor maps. Dependents are NOT re-resolved to a
     /// new target (MRU-at-open-time policy).
     pub fn orphan_floating_anchor_dependents_of(&mut self, target: &W::Id) -> Vec<W::Id> {
-        self.floating_anchors.orphan_dependents_of(target)
+        let orphans = self.floating_anchors.orphan_dependents_of(target);
+        // Each orphan loses its workspace cache (it's no longer anchored).
+        for orphan in &orphans {
+            self.floating_anchor_dependent_workspaces.remove(orphan);
+        }
+        // Target's rect cache is also no longer needed.
+        self.floating_anchor_target_rects.remove(target);
+        orphans
     }
 
     /// What target is `dependent` anchored to? `None` if free-floating.
@@ -779,8 +814,9 @@ impl<W: LayoutElement> Layout<W> {
         self.floating_anchors.target_of(dependent)
     }
 
-    /// Iterate dependents anchored to `target`. Used by the geometry-changed
-    /// handler in the next task to find who needs to be re-placed.
+    /// Iterate dependents anchored to `target`. The hot-path event handler
+    /// ([`Self::notify_tile_changed`]) hits this on every actual tile-rect
+    /// change to find who needs to be re-placed.
     pub fn floating_anchor_dependents_of(
         &self,
         target: &W::Id,
@@ -819,35 +855,94 @@ impl<W: LayoutElement> Layout<W> {
         None
     }
 
-    /// Walk every registered cross-window-anchor dependent and re-place
-    /// each one against its current target's tile rectangle. Driven from
-    /// [`Self::advance_animations`] every frame so dependents track their
-    /// targets across moves, resizes, workspace/output transitions, and
-    /// animated transitions — without polling any specific mutator site.
+    /// Event-driven re-position entry point: `target_id`'s tile rect has
+    /// just changed to `new_rect`. Reposition all dependents anchored to
+    /// `target_id` to track the new rect.
     ///
-    /// Cost is O(number-of-anchored-dependents), not O(N) in mapped
-    /// windows: dependents are typically 0–3 (a Zoom Meeting open with
-    /// one or two helper dialogs); the forward-map walk is tight.
-    pub fn resweep_all_anchor_dependents(&mut self) {
-        // Collect ids first to release the immutable borrow on
-        // floating_anchors before the mutable reposition pass.
-        let dependents: Vec<W::Id> = self.floating_anchors.dependents_iter().cloned().collect();
+    /// Complexity is O(dependents_of_target × workspaces): the
+    /// reverse-index lookup is O(1), then per-dependent the cached
+    /// workspace lookup avoids the tile scan but still walks
+    /// `workspaces_mut()` (typically ≤ 10) to find the right one to dispatch
+    /// the reposition into. Workspaces themselves are not searched by tile.
+    ///
+    /// Updates the target-rect cache so the next sweep can compare-and-skip
+    /// when the rect hasn't moved.
+    pub fn notify_tile_changed(&mut self, target_id: &W::Id, new_rect: Rectangle<f64, Logical>) {
+        // Update cache first so a sweep racing this notify converges.
+        self.floating_anchor_target_rects
+            .insert(target_id.clone(), new_rect);
+
+        // O(1) reverse-index lookup. If no dependents, return immediately —
+        // this is the no-op path for tiles that aren't anchor targets.
+        let dependents: Vec<W::Id> = self
+            .floating_anchors
+            .dependents_of(target_id)
+            .cloned()
+            .collect();
+        if dependents.is_empty() {
+            return;
+        }
+
         for dependent in dependents {
-            self.reposition_floating_anchor_dependent(&dependent);
+            // Cached workspace lookup — set at registration, kept current by
+            // any future workspace-migration hook. If missing (shouldn't
+            // happen) we silently skip rather than mis-target.
+            let Some(ws_id) = self
+                .floating_anchor_dependent_workspaces
+                .get(&dependent)
+                .copied()
+            else {
+                continue;
+            };
+            for ws in self.workspaces_mut() {
+                if ws.id() == ws_id {
+                    ws.reposition_floating_anchored(&dependent, new_rect);
+                    break;
+                }
+            }
         }
     }
 
-    /// Recompute the position of `dependent` using its registered anchor
-    /// target's tile rectangle as the reference frame, and persist the new
-    /// position on the dependent's floating tile. No-op if the dependent
-    /// isn't anchored, isn't floating, or its target's rectangle can't be
-    /// resolved (fall-through behavior matches "no anchor configured").
+    /// Reverse-keyed sweep driven from [`Self::advance_animations`]. For
+    /// each unique anchor *target* (not each dependent), compares the
+    /// target's current rect to the cached last-seen rect; fires
+    /// [`Self::notify_tile_changed`] only on actual change. This is the
+    /// fallback driver for mutators that don't yet fire `notify_tile_changed`
+    /// directly — once every relevant mutator hooks the event, this sweep
+    /// becomes redundant.
     ///
-    /// This is the single primitive both the initial-placement hook (called
-    /// after `register_floating_anchor`) and the reactive re-position
-    /// trigger (next task — fires on tile-geometry-changed) invoke.
-    /// Keeping it as one function ensures both paths produce identical
-    /// positions.
+    /// Cost: O(1) when no anchors are registered (early return). Otherwise
+    /// O(unique_targets) tile-rect lookups + O(changed_targets × dependents)
+    /// repositions. Targets with no actual rect change cost only the
+    /// comparison.
+    pub fn resweep_all_anchor_dependents(&mut self) {
+        if self.floating_anchors.is_empty() {
+            return;
+        }
+
+        // Snapshot unique targets to release the immutable borrow.
+        let targets: Vec<W::Id> = self.floating_anchors.targets_iter().cloned().collect();
+        for target_id in targets {
+            let Some(current_rect) = self.tile_visual_rect(&target_id) else {
+                continue;
+            };
+            let cached = self.floating_anchor_target_rects.get(&target_id).copied();
+            if cached == Some(current_rect) {
+                continue;
+            }
+            self.notify_tile_changed(&target_id, current_rect);
+        }
+    }
+
+    /// Re-position a single registered dependent against its target's
+    /// current rect. Used at dialog-map time (compositor.rs hook) right
+    /// after the initial `register_floating_anchor` call — the dependent
+    /// needs to be lifted off the working-area-center fallback to its
+    /// proper target-relative position.
+    ///
+    /// No-op if `dependent` isn't anchored or its target's rect can't be
+    /// resolved. Routes through [`Self::notify_tile_changed`] so the single
+    /// reposition path stays consistent with the event-driven flow.
     pub fn reposition_floating_anchor_dependent(&mut self, dependent: &W::Id) {
         let Some(target) = self.floating_anchors.target_of(dependent).cloned() else {
             return;
@@ -855,26 +950,7 @@ impl<W: LayoutElement> Layout<W> {
         let Some(target_rect) = self.tile_visual_rect(&target) else {
             return;
         };
-        match &mut self.monitor_set {
-            MonitorSet::Normal { monitors, .. } => {
-                for monitor in monitors {
-                    for ws in &mut monitor.workspaces {
-                        if ws.has_window(dependent) {
-                            ws.reposition_floating_anchored(dependent, target_rect);
-                            return;
-                        }
-                    }
-                }
-            }
-            MonitorSet::NoOutputs { workspaces } => {
-                for ws in workspaces {
-                    if ws.has_window(dependent) {
-                        ws.reposition_floating_anchored(dependent, target_rect);
-                        return;
-                    }
-                }
-            }
-        }
+        self.notify_tile_changed(&target, target_rect);
     }
 
     pub fn add_output(&mut self, output: Output, layout_config: Option<LayoutPart>) {

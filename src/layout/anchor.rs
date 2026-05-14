@@ -161,12 +161,24 @@ impl<Id: Eq + Hash + Clone + Debug> AnchorIndex<Id> {
         self.forward.contains_key(dependent)
     }
 
-    /// Iterate every registered dependent (every id with a target). The
-    /// reactive re-position trigger uses this in `advance_animations` to
-    /// walk only the small set of cross-window-anchored windows rather
-    /// than the entire layout.
+    /// True iff no anchors are registered. Used by [`Layout::resweep_all_anchor_dependents`]
+    /// (and any future event-driven hook) as an O(1) early-exit before
+    /// touching any sweep state.
+    pub fn is_empty(&self) -> bool {
+        self.forward.is_empty()
+    }
+
+    /// Iterate every registered dependent (every id with a target).
     pub fn dependents_iter(&self) -> impl Iterator<Item = &Id> + '_ {
         self.forward.keys()
+    }
+
+    /// Iterate the UNIQUE set of targets (reverse-map keys) — every id with
+    /// at least one dependent. This is what the reverse-keyed sweep walks:
+    /// one rect-lookup per unique target, not per dependent. Pairs with
+    /// [`Self::dependents_of`] to retrieve each target's dependent set.
+    pub fn targets_iter(&self) -> impl Iterator<Item = &Id> + '_ {
+        self.reverse.keys()
     }
 }
 
@@ -189,6 +201,52 @@ mod tests {
         assert_eq!(outcome, RegisterOutcome::Registered);
         assert_eq!(idx.target_of(&1), Some(&2));
         assert_eq!(collect_deps(&idx, 2), vec![1]);
+    }
+
+    // -- New API: is_empty (improvement C22) and targets_iter (needed by the
+    //    reverse-keyed sweep that fixes the event-driven contract from C3/C21).
+
+    #[test]
+    fn is_empty_returns_true_on_fresh_index() {
+        let idx = Idx::new();
+        assert!(idx.is_empty());
+    }
+
+    #[test]
+    fn is_empty_returns_false_after_register() {
+        let mut idx = Idx::new();
+        idx.register(1, 2);
+        assert!(!idx.is_empty());
+    }
+
+    #[test]
+    fn is_empty_returns_true_after_all_unregister() {
+        let mut idx = Idx::new();
+        idx.register(1, 2);
+        idx.unregister(&1);
+        assert!(idx.is_empty());
+    }
+
+    #[test]
+    fn targets_iter_yields_unique_targets_not_dependent_count() {
+        // Two dependents pointing at the same target → targets_iter yields
+        // that target ONCE. This is the key complexity property: the
+        // reverse-keyed sweep iterates unique targets, not all dependents.
+        let mut idx = Idx::new();
+        idx.register(1, 100);
+        idx.register(2, 100);
+        idx.register(3, 200);
+        let mut targets: Vec<u32> = idx.targets_iter().copied().collect();
+        targets.sort_unstable();
+        assert_eq!(targets, vec![100, 200]);
+    }
+
+    #[test]
+    fn targets_iter_excludes_targets_with_no_dependents_after_unregister() {
+        let mut idx = Idx::new();
+        idx.register(1, 100);
+        idx.unregister(&1);
+        assert_eq!(idx.targets_iter().count(), 0);
     }
 
     #[test]
