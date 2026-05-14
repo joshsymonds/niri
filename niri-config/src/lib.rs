@@ -60,7 +60,7 @@ pub use crate::recent_windows::{MruDirection, MruFilter, MruPreviews, MruScope, 
 pub use crate::utils::FloatOrInt;
 use crate::utils::{Flag, MergeWith as _};
 pub use crate::window_rule::{
-    FloatingPosition, PopupsRule, RelativeTo, ResolvedPopupsRules, WindowRule,
+    FloatingPosition, PopupsRule, PositionFrame, RelativeTo, ResolvedPopupsRules, WindowRule,
 };
 pub use crate::workspace::{Workspace, WorkspaceLayoutPart};
 
@@ -1878,6 +1878,7 @@ mod tests {
                                 -200.0,
                             ),
                             relative_to: BottomLeft,
+                            in_window_of: None,
                         },
                     ),
                     scroll_factor: None,
@@ -2394,6 +2395,94 @@ mod tests {
             },
         }
         "#);
+    }
+
+    #[test]
+    fn parse_default_floating_position_no_in_window_of_means_working_area() {
+        let config = do_parse(
+            r##"
+            window-rule {
+                default-floating-position x=10 y=20 relative-to="top-left"
+            }
+            "##,
+        );
+        let pos = config.window_rules[0]
+            .default_floating_position
+            .as_ref()
+            .expect("default-floating-position should have parsed");
+        assert!(pos.in_window_of.is_none(), "default frame is WorkingArea");
+        assert!(matches!(pos.frame(), PositionFrame::WorkingArea));
+    }
+
+    #[test]
+    fn parse_in_window_of_with_app_id() {
+        let config = do_parse(
+            r##"
+            window-rule {
+                default-floating-position x=0 y=0 relative-to="top" {
+                    in-window-of app-id="^Zoom$"
+                }
+            }
+            "##,
+        );
+        let pos = config.window_rules[0]
+            .default_floating_position
+            .as_ref()
+            .expect("default-floating-position should have parsed");
+        let target = pos
+            .in_window_of
+            .as_ref()
+            .expect("in-window-of should have parsed");
+        assert_eq!(target.app_id.as_ref().map(|r| r.0.as_str()), Some("^Zoom$"));
+        assert!(target.title.is_none());
+        match pos.frame() {
+            PositionFrame::Window { target: t } => {
+                assert_eq!(t.app_id.as_ref().map(|r| r.0.as_str()), Some("^Zoom$"));
+            }
+            PositionFrame::WorkingArea => panic!("expected Window frame"),
+        }
+    }
+
+    #[test]
+    fn parse_in_window_of_with_app_id_and_title() {
+        let config = do_parse(
+            r##"
+            window-rule {
+                default-floating-position x=0 y=0 relative-to="top" {
+                    in-window-of app-id="^Zoom$" title="^Meeting$"
+                }
+            }
+            "##,
+        );
+        let target = config.window_rules[0]
+            .default_floating_position
+            .as_ref()
+            .and_then(|p| p.in_window_of.as_ref())
+            .expect("in-window-of should have parsed");
+        assert_eq!(target.app_id.as_ref().map(|r| r.0.as_str()), Some("^Zoom$"));
+        assert_eq!(
+            target.title.as_ref().map(|r| r.0.as_str()),
+            Some("^Meeting$")
+        );
+    }
+
+    #[test]
+    fn parse_in_window_of_with_state_field() {
+        let config = do_parse(
+            r##"
+            window-rule {
+                default-floating-position x=10 y=10 relative-to="top" {
+                    in-window-of app-id="^Zoom$" is-floating=true
+                }
+            }
+            "##,
+        );
+        let target = config.window_rules[0]
+            .default_floating_position
+            .as_ref()
+            .and_then(|p| p.in_window_of.as_ref())
+            .expect("in-window-of should have parsed");
+        assert_eq!(target.is_floating, Some(true));
     }
 
     fn diff_lines(expected: &str, actual: &str) -> String {

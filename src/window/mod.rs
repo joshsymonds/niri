@@ -225,8 +225,8 @@ impl ResolvedWindowRules {
                     resolved.default_column_display = Some(x);
                 }
 
-                if let Some(x) = rule.default_floating_position {
-                    resolved.default_floating_position = Some(x);
+                if let Some(x) = &rule.default_floating_position {
+                    resolved.default_floating_position = Some(x.clone());
                 }
 
                 if let Some(x) = rule.open_on_output.as_deref() {
