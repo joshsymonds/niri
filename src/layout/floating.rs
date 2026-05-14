@@ -3,7 +3,7 @@ use std::iter::zip;
 use std::rc::Rc;
 
 use niri_config::utils::MergeWith as _;
-use niri_config::{PresetSize, RelativeTo};
+use niri_config::{FloatingPosition, PresetSize, RelativeTo};
 use niri_ipc::{PositionChange, SizeChange, WindowLayout};
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::utils::{Logical, Point, Rectangle, Scale, Serial, Size};
@@ -400,6 +400,29 @@ impl<W: LayoutElement> FloatingSpace<W> {
         self.tiles.iter().any(|tile| tile.window().id() == id)
     }
 
+    /// Re-place a floating tile using `target_rect` as the reference frame
+    /// for its `default_floating_position` rule, instead of the working
+    /// area. Drives the cross-window positioning feature
+    /// (`PositionFrame::Window`) at initial placement and (in a later task)
+    /// at reactive re-position triggered by tile-geometry-changed.
+    ///
+    /// No-op if `id` isn't in this `FloatingSpace` or its window carries no
+    /// `default_floating_position` rule to interpret.
+    pub fn reposition_anchored(&mut self, id: &W::Id, target_rect: Rectangle<f64, Logical>) {
+        let Some(idx) = self.tiles.iter().position(|t| t.window().id() == id) else {
+            return;
+        };
+        let new_logical_pos = {
+            let tile = &self.tiles[idx];
+            let Some(rule) = tile.window().rules().default_floating_position.as_ref() else {
+                return;
+            };
+            compute_anchor_position(rule, target_rect, tile.tile_size())
+        };
+        self.data[idx].set_logical_pos(new_logical_pos);
+        self.tiles[idx].floating_pos = Some(self.data[idx].pos);
+    }
+
     pub fn is_empty(&self) -> bool {
         self.tiles.is_empty()
     }
@@ -446,9 +469,11 @@ impl<W: LayoutElement> FloatingSpace<W> {
             }
         }
 
-        let pos = self.stored_or_default_tile_pos(&tile).unwrap_or_else(|| {
-            center_preferring_top_left_in_area(self.working_area, tile.tile_size())
-        });
+        let pos = self
+            .stored_or_default_tile_pos(&tile, None)
+            .unwrap_or_else(|| {
+                center_preferring_top_left_in_area(self.working_area, tile.tile_size())
+            });
 
         let data = Data::new(self.working_area, &tile, pos);
         self.data.insert(idx, data);
@@ -1273,39 +1298,20 @@ impl<W: LayoutElement> FloatingSpace<W> {
         Size::from((width, height))
     }
 
-    pub fn stored_or_default_tile_pos(&self, tile: &Tile<W>) -> Option<Point<f64, Logical>> {
+    pub fn stored_or_default_tile_pos(
+        &self,
+        tile: &Tile<W>,
+        reference_override: Option<Rectangle<f64, Logical>>,
+    ) -> Option<Point<f64, Logical>> {
         let pos = tile.floating_pos.map(|pos| self.scale_by_working_area(pos));
         pos.or_else(|| {
             tile.window()
                 .rules()
                 .default_floating_position
                 .as_ref()
-                .map(|pos| {
-                    let relative_to = pos.relative_to;
-                    let size = tile.tile_size();
-                    let area = self.working_area;
-
-                    let mut pos = Point::from((pos.x.0, pos.y.0));
-                    if relative_to == RelativeTo::TopRight
-                        || relative_to == RelativeTo::BottomRight
-                        || relative_to == RelativeTo::Right
-                    {
-                        pos.x = area.size.w - size.w - pos.x;
-                    }
-                    if relative_to == RelativeTo::BottomLeft
-                        || relative_to == RelativeTo::BottomRight
-                        || relative_to == RelativeTo::Bottom
-                    {
-                        pos.y = area.size.h - size.h - pos.y;
-                    }
-                    if relative_to == RelativeTo::Top || relative_to == RelativeTo::Bottom {
-                        pos.x += area.size.w / 2.0 - size.w / 2.0
-                    }
-                    if relative_to == RelativeTo::Left || relative_to == RelativeTo::Right {
-                        pos.y += area.size.h / 2.0 - size.h / 2.0
-                    }
-
-                    pos + self.working_area.loc
+                .map(|rule| {
+                    let reference = reference_override.unwrap_or(self.working_area);
+                    compute_anchor_position(rule, reference, tile.tile_size())
                 })
         })
     }
@@ -1393,6 +1399,46 @@ impl<W: LayoutElement> FloatingSpace<W> {
     }
 }
 
+/// Computes the absolute logical position of a tile placed inside a reference
+/// rectangle via a `default-floating-position`-style rule.
+///
+/// Pure math, no `FloatingSpace` dependency — both modes of placement (anchor
+/// inside the workspace `working_area` and anchor inside another window's tile
+/// rectangle from `PositionFrame::Window`) share this function. The caller
+/// chooses which `reference` rectangle to pass; the math is identical.
+///
+/// `rule.x` / `rule.y` are interpreted as offsets *within* the reference
+/// rectangle, in the coordinate orientation given by `rule.relative_to`:
+/// corner anchors flip the offset around the appropriate axis, axis anchors
+/// (`Top`/`Bottom`/`Left`/`Right`) auto-center the perpendicular axis.
+pub fn compute_anchor_position(
+    rule: &FloatingPosition,
+    reference: Rectangle<f64, Logical>,
+    tile_size: Size<f64, Logical>,
+) -> Point<f64, Logical> {
+    let relative_to = rule.relative_to;
+    let mut pos = Point::from((rule.x.0, rule.y.0));
+    if matches!(
+        relative_to,
+        RelativeTo::TopRight | RelativeTo::BottomRight | RelativeTo::Right
+    ) {
+        pos.x = reference.size.w - tile_size.w - pos.x;
+    }
+    if matches!(
+        relative_to,
+        RelativeTo::BottomLeft | RelativeTo::BottomRight | RelativeTo::Bottom
+    ) {
+        pos.y = reference.size.h - tile_size.h - pos.y;
+    }
+    if matches!(relative_to, RelativeTo::Top | RelativeTo::Bottom) {
+        pos.x += reference.size.w / 2.0 - tile_size.w / 2.0
+    }
+    if matches!(relative_to, RelativeTo::Left | RelativeTo::Right) {
+        pos.y += reference.size.h / 2.0 - tile_size.h / 2.0
+    }
+    pos + reference.loc
+}
+
 fn compute_toplevel_bounds(
     border_config: niri_config::Border,
     working_area_size: Size<f64, Logical>,
@@ -1413,5 +1459,112 @@ fn resolve_preset_size(preset: PresetSize, view_size: f64) -> ResolvedSize {
     match preset {
         PresetSize::Proportion(proportion) => ResolvedSize::Tile(view_size * proportion),
         PresetSize::Fixed(width) => ResolvedSize::Window(f64::from(width)),
+    }
+}
+
+#[cfg(test)]
+mod anchor_position_tests {
+    use niri_config::utils::FloatOrInt;
+
+    use super::*;
+
+    fn rule(x: f64, y: f64, relative_to: RelativeTo) -> FloatingPosition {
+        FloatingPosition {
+            x: FloatOrInt(x),
+            y: FloatOrInt(y),
+            relative_to,
+            in_window_of: None,
+        }
+    }
+
+    fn working_area_2560x1440() -> Rectangle<f64, Logical> {
+        Rectangle::new(Point::from((0.0, 0.0)), Size::from((2560.0, 1440.0)))
+    }
+
+    fn tile_250x52() -> Size<f64, Logical> {
+        Size::from((250.0, 52.0))
+    }
+
+    // -- WorkingArea / TopLeft (default) preserves existing behavior. --
+
+    #[test]
+    fn top_left_zero_offset_lands_at_reference_origin() {
+        let r = rule(0.0, 0.0, RelativeTo::TopLeft);
+        let pos = compute_anchor_position(&r, working_area_2560x1440(), tile_250x52());
+        assert_eq!(pos, Point::from((0.0, 0.0)));
+    }
+
+    #[test]
+    fn top_left_with_offset_lands_at_offset_from_origin() {
+        let r = rule(20.0, 20.0, RelativeTo::TopLeft);
+        let pos = compute_anchor_position(&r, working_area_2560x1440(), tile_250x52());
+        assert_eq!(pos, Point::from((20.0, 20.0)));
+    }
+
+    #[test]
+    fn bottom_right_zero_offset_lands_at_far_corner_minus_tile_size() {
+        let r = rule(0.0, 0.0, RelativeTo::BottomRight);
+        let pos = compute_anchor_position(&r, working_area_2560x1440(), tile_250x52());
+        // 2560 - 250 - 0 = 2310; 1440 - 52 - 0 = 1388
+        assert_eq!(pos, Point::from((2310.0, 1388.0)));
+    }
+
+    #[test]
+    fn top_centers_x_axis_only() {
+        let r = rule(0.0, 80.0, RelativeTo::Top);
+        let pos = compute_anchor_position(&r, working_area_2560x1440(), tile_250x52());
+        // x: (2560 - 250) / 2 = 1155; y: 80
+        assert_eq!(pos, Point::from((1155.0, 80.0)));
+    }
+
+    // -- Non-zero reference origin: this is the cross-window-anchor case. --
+
+    #[test]
+    fn anchor_inside_offset_reference_rect_top_left() {
+        // Imagine the target tile is at (1000, 500) with size (1252, 1432) on
+        // a workspace where Meeting is column 2.
+        let reference = Rectangle::new(Point::from((1000.0, 500.0)), Size::from((1252.0, 1432.0)));
+        let r = rule(20.0, 20.0, RelativeTo::TopLeft);
+        let pos = compute_anchor_position(&r, reference, tile_250x52());
+        // 1000 + 20 = 1020; 500 + 20 = 520
+        assert_eq!(pos, Point::from((1020.0, 520.0)));
+    }
+
+    #[test]
+    fn anchor_inside_offset_reference_rect_top_center() {
+        // Same target as above; use RelativeTo::Top with y=80 to center
+        // horizontally over the target with an 80px gutter from top.
+        let reference = Rectangle::new(Point::from((1000.0, 500.0)), Size::from((1252.0, 1432.0)));
+        let r = rule(0.0, 80.0, RelativeTo::Top);
+        let pos = compute_anchor_position(&r, reference, tile_250x52());
+        // x = 1000 + (1252 - 250) / 2 = 1000 + 501 = 1501
+        // y = 500 + 80 = 580
+        assert_eq!(pos, Point::from((1501.0, 580.0)));
+    }
+
+    #[test]
+    fn anchor_inside_offset_reference_rect_bottom_right() {
+        let reference = Rectangle::new(Point::from((1000.0, 500.0)), Size::from((1252.0, 1432.0)));
+        let r = rule(30.0, 30.0, RelativeTo::BottomRight);
+        let pos = compute_anchor_position(&r, reference, tile_250x52());
+        // x = 1000 + (1252 - 250 - 30) = 1000 + 972 = 1972
+        // y = 500 + (1432 - 52 - 30) = 500 + 1350 = 1850
+        assert_eq!(pos, Point::from((1972.0, 1850.0)));
+    }
+
+    // -- Same reference rect but offset rule.x/y vs working-area math. --
+
+    #[test]
+    fn reference_origin_translates_result() {
+        // For TopLeft with zero offset, the result is exactly the reference
+        // origin. Demonstrates the origin-translation property the cross-
+        // window mode depends on.
+        let r = rule(0.0, 0.0, RelativeTo::TopLeft);
+        let zero_origin = Rectangle::new(Point::from((0.0, 0.0)), Size::from((100.0, 100.0)));
+        let offset_origin = Rectangle::new(Point::from((777.0, 333.0)), Size::from((100.0, 100.0)));
+        let pos_zero = compute_anchor_position(&r, zero_origin, Size::from((10.0, 10.0)));
+        let pos_offset = compute_anchor_position(&r, offset_origin, Size::from((10.0, 10.0)));
+        assert_eq!(pos_zero, Point::from((0.0, 0.0)));
+        assert_eq!(pos_offset, Point::from((777.0, 333.0)));
     }
 }

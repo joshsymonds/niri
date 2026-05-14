@@ -804,6 +804,61 @@ impl<W: LayoutElement> Layout<W> {
         None
     }
 
+    /// The tile's visual rectangle in its workspace's view coordinates.
+    /// Used by [`Self::reposition_floating_anchor_dependent`] to obtain the
+    /// reference rectangle for cross-window positioning math.
+    pub fn tile_visual_rect(&self, id: &W::Id) -> Option<Rectangle<f64, Logical>> {
+        for (_monitor, _idx, workspace) in self.workspaces() {
+            if let Some((tile, render_pos, _visible)) = workspace
+                .tiles_with_render_positions()
+                .find(|(t, _, _)| t.window().id() == id)
+            {
+                return Some(Rectangle::new(render_pos, tile.tile_size()));
+            }
+        }
+        None
+    }
+
+    /// Recompute the position of `dependent` using its registered anchor
+    /// target's tile rectangle as the reference frame, and persist the new
+    /// position on the dependent's floating tile. No-op if the dependent
+    /// isn't anchored, isn't floating, or its target's rectangle can't be
+    /// resolved (fall-through behavior matches "no anchor configured").
+    ///
+    /// This is the single primitive both the initial-placement hook (called
+    /// after `register_floating_anchor`) and the reactive re-position
+    /// trigger (next task — fires on tile-geometry-changed) invoke.
+    /// Keeping it as one function ensures both paths produce identical
+    /// positions.
+    pub fn reposition_floating_anchor_dependent(&mut self, dependent: &W::Id) {
+        let Some(target) = self.floating_anchors.target_of(dependent).cloned() else {
+            return;
+        };
+        let Some(target_rect) = self.tile_visual_rect(&target) else {
+            return;
+        };
+        match &mut self.monitor_set {
+            MonitorSet::Normal { monitors, .. } => {
+                for monitor in monitors {
+                    for ws in &mut monitor.workspaces {
+                        if ws.has_window(dependent) {
+                            ws.reposition_floating_anchored(dependent, target_rect);
+                            return;
+                        }
+                    }
+                }
+            }
+            MonitorSet::NoOutputs { workspaces } => {
+                for ws in workspaces {
+                    if ws.has_window(dependent) {
+                        ws.reposition_floating_anchored(dependent, target_rect);
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
     pub fn add_output(&mut self, output: Output, layout_config: Option<LayoutPart>) {
         self.monitor_set = match mem::take(&mut self.monitor_set) {
             MonitorSet::Normal {
