@@ -161,6 +161,14 @@ impl<Id: Eq + Hash + Clone + Debug> AnchorIndex<Id> {
         self.forward.contains_key(dependent)
     }
 
+    /// True if `target` has at least one dependent (i.e. is the value of some
+    /// forward entry). Used by [`crate::layout::Layout::unregister_floating_anchor`]
+    /// to decide whether to prune cached target state when the last dependent
+    /// disappears.
+    pub fn is_registered_as_target(&self, target: &Id) -> bool {
+        self.reverse.contains_key(target)
+    }
+
     /// True iff no anchors are registered. Used by [`Layout::resweep_all_anchor_dependents`]
     /// (and any future event-driven hook) as an O(1) early-exit before
     /// touching any sweep state.
