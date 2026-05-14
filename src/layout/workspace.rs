@@ -1416,7 +1416,9 @@ impl<W: LayoutElement> Workspace<W> {
             removed.tile.stop_move_animations();
 
             // Come up with a default floating position close to the tile position.
-            let stored_or_default = self.floating.stored_or_default_tile_pos(&removed.tile);
+            let stored_or_default = self
+                .floating
+                .stored_or_default_tile_pos(&removed.tile, None);
             if stored_or_default.is_none() {
                 let offset =
                     if self.options.layout.center_focused_column == CenterFocusedColumn::Always {
@@ -1508,7 +1510,7 @@ impl<W: LayoutElement> Workspace<W> {
                 return;
             };
 
-            let pos = self.floating.stored_or_default_tile_pos(tile);
+            let pos = self.floating.stored_or_default_tile_pos(tile, None);
 
             // If there's no stored floating position, we can only set both components at once, not
             // adjust.
@@ -1985,6 +1987,20 @@ impl<W: LayoutElement> Workspace<W> {
     #[cfg(test)]
     pub fn floating(&self) -> &FloatingSpace<W> {
         &self.floating
+    }
+
+    /// Re-place a floating tile in this workspace using `target_rect` as the
+    /// reference for its `default_floating_position` rule. Forwards to
+    /// `FloatingSpace::reposition_anchored`. No-op if the id isn't in the
+    /// floating set.
+    pub fn reposition_floating_anchored(
+        &mut self,
+        id: &W::Id,
+        target_rect: Rectangle<f64, Logical>,
+    ) {
+        if self.floating.has_window(id) {
+            self.floating.reposition_anchored(id, target_rect);
+        }
     }
 
     #[cfg(test)]

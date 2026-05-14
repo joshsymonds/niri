@@ -263,6 +263,12 @@ impl CompositorHandler for State {
                                     anchor_dependent_window.clone(),
                                     target_window,
                                 );
+                                // Move the freshly-mapped dialog from the
+                                // working-area-center fallback to its
+                                // target-rect-relative position.
+                                self.niri
+                                    .layout
+                                    .reposition_floating_anchor_dependent(&anchor_dependent_window);
                             }
                         }
                     }
