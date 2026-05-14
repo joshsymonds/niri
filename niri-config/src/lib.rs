@@ -2389,6 +2389,40 @@ mod tests {
         "#);
     }
 
+    #[test]
+    fn parse_default_floating_position_center() {
+        let config = do_parse(
+            r##"
+            window-rule {
+                default-floating-position x=0 y=0 relative-to="center"
+            }
+            "##,
+        );
+        let pos = config.window_rules[0]
+            .default_floating_position
+            .expect("default-floating-position should have parsed");
+        assert_eq!(pos.x.0, 0.0);
+        assert_eq!(pos.y.0, 0.0);
+        assert_eq!(pos.relative_to, RelativeTo::Center);
+    }
+
+    #[test]
+    fn parse_default_floating_position_center_with_offset() {
+        let config = do_parse(
+            r##"
+            window-rule {
+                default-floating-position x=100 y=-50 relative-to="center"
+            }
+            "##,
+        );
+        let pos = config.window_rules[0]
+            .default_floating_position
+            .expect("default-floating-position should have parsed");
+        assert_eq!(pos.x.0, 100.0);
+        assert_eq!(pos.y.0, -50.0);
+        assert_eq!(pos.relative_to, RelativeTo::Center);
+    }
+
     fn diff_lines(expected: &str, actual: &str) -> String {
         let mut output = String::new();
         let mut in_change = false;
