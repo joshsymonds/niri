@@ -160,6 +160,14 @@ impl<Id: Eq + Hash + Clone + Debug> AnchorIndex<Id> {
     pub fn is_registered(&self, dependent: &Id) -> bool {
         self.forward.contains_key(dependent)
     }
+
+    /// Iterate every registered dependent (every id with a target). The
+    /// reactive re-position trigger uses this in `advance_animations` to
+    /// walk only the small set of cross-window-anchored windows rather
+    /// than the entire layout.
+    pub fn dependents_iter(&self) -> impl Iterator<Item = &Id> + '_ {
+        self.forward.keys()
+    }
 }
 
 #[cfg(test)]

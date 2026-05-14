@@ -819,6 +819,24 @@ impl<W: LayoutElement> Layout<W> {
         None
     }
 
+    /// Walk every registered cross-window-anchor dependent and re-place
+    /// each one against its current target's tile rectangle. Driven from
+    /// [`Self::advance_animations`] every frame so dependents track their
+    /// targets across moves, resizes, workspace/output transitions, and
+    /// animated transitions — without polling any specific mutator site.
+    ///
+    /// Cost is O(number-of-anchored-dependents), not O(N) in mapped
+    /// windows: dependents are typically 0–3 (a Zoom Meeting open with
+    /// one or two helper dialogs); the forward-map walk is tight.
+    pub fn resweep_all_anchor_dependents(&mut self) {
+        // Collect ids first to release the immutable borrow on
+        // floating_anchors before the mutable reposition pass.
+        let dependents: Vec<W::Id> = self.floating_anchors.dependents_iter().cloned().collect();
+        for dependent in dependents {
+            self.reposition_floating_anchor_dependent(&dependent);
+        }
+    }
+
     /// Recompute the position of `dependent` using its registered anchor
     /// target's tile rectangle as the reference frame, and persist the new
     /// position on the dependent's floating tile. No-op if the dependent
@@ -2849,6 +2867,12 @@ impl<W: LayoutElement> Layout<W> {
                 }
             }
         }
+
+        // After all per-tile animation steps, re-place cross-window-anchored
+        // dependents against their (possibly-now-different) targets. The
+        // reverse-index lookup keeps this O(anchored-dependents); see
+        // [`Self::resweep_all_anchor_dependents`] rationale.
+        self.resweep_all_anchor_dependents();
     }
 
     pub fn are_animations_ongoing(&self, output: Option<&Output>) -> bool {
