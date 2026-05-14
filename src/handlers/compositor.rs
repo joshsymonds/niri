@@ -247,10 +247,10 @@ impl CompositorHandler for State {
                     // the dependent is in the layout and we can read its
                     // workspace/output) and register the relationship.
                     if let Some(target_match) = anchor_target_match {
-                        if let Some((ws_id, dep_output)) = self
+                        if let Some((ws_id, dep_output, _idx)) = self
                             .niri
                             .layout
-                            .find_workspace_and_output_by_id(&anchor_dependent_window)
+                            .find_window_position_by_id(&anchor_dependent_window)
                         {
                             let dep_output_name = dep_output.map(|o| o.name().to_string());
                             let is_at_startup = self.niri.is_at_startup;

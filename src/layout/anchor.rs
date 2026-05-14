@@ -80,7 +80,19 @@ impl<Id: Eq + Hash + Clone + Debug> AnchorIndex<Id> {
     /// is silently replaced (this is the supported re-anchor path, not an
     /// error). Returns whether the new chain is shallow (depth 1) or
     /// recursive (depth > 1, e.g. A → B → C).
+    ///
+    /// Self-anchor (`dependent == target`) is treated as a recursive chain
+    /// — the forward map would contain a self-cycle and the sweep would
+    /// repeatedly re-fire on it. Caller `warn!`s the user via the same
+    /// path it does for other recursive chains.
     pub fn register(&mut self, dependent: Id, target: Id) -> RegisterOutcome {
+        // Self-anchor: detect before the depth walk, because the walk
+        // starts from `forward.get(&target)` BEFORE the new entry is
+        // inserted, so a self-anchor would appear as a shallow chain
+        // (depth=1) under the normal logic — letting an obviously
+        // pathological config slip through unannounced.
+        let is_self_anchor = dependent == target;
+
         // Walk the forward chain from the new target to measure depth. The
         // existing dependent's old chain is irrelevant because we're about
         // to overwrite it.
@@ -108,8 +120,13 @@ impl<Id: Eq + Hash + Clone + Debug> AnchorIndex<Id> {
         self.forward.insert(dependent.clone(), target.clone());
         self.reverse.entry(target).or_default().insert(dependent);
 
-        if depth > 1 {
-            RegisterOutcome::RecursiveAnchor { chain_depth: depth }
+        if is_self_anchor || depth > 1 {
+            // For self-anchors, report depth=1 (the chain is literally
+            // length 1 — one node pointing at itself). The caller still
+            // sees `RecursiveAnchor` and warns.
+            RegisterOutcome::RecursiveAnchor {
+                chain_depth: depth.max(1),
+            }
         } else {
             RegisterOutcome::Registered
         }
@@ -336,6 +353,22 @@ mod tests {
         // 1 → 2, where 2 has no target.
         let outcome = idx.register(1, 2);
         assert_eq!(outcome, RegisterOutcome::Registered);
+    }
+
+    #[test]
+    fn self_anchor_reports_recursive() {
+        // A window anchored to itself (`register(1, 1)`) would otherwise
+        // slip through the depth walk as `Registered` (since the walk
+        // starts from `forward.get(&target)` BEFORE the new entry is
+        // inserted, so the cycle is invisible to the walk). The dedicated
+        // self-anchor check catches it and reports RecursiveAnchor so the
+        // caller can warn.
+        let mut idx = Idx::new();
+        let outcome = idx.register(1, 1);
+        assert_eq!(outcome, RegisterOutcome::RecursiveAnchor { chain_depth: 1 });
+        // The maps still reflect the registration; we don't reject, we
+        // just flag.
+        assert_eq!(idx.target_of(&1), Some(&1));
     }
 
     #[test]

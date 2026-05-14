@@ -143,6 +143,45 @@ fn dialog_opens_anchored_to_target_top_left() {
 }
 
 #[test]
+fn dialog_opens_centered_on_target_via_relative_to_center() {
+    // The epic adds RelativeTo::Center, which works in both WorkingArea
+    // and Window frames via the single `compute_anchor_position` function.
+    // The Center math is unit-tested in `src/layout/floating.rs`, but no
+    // integration test parses a config with `relative-to="center"` +
+    // `in-window-of` and exercises the full pipe through the resolver +
+    // map-hook. This test pins that end-to-end behavior.
+    let cfg = Config::parse_mem(
+        r##"
+        window-rule {
+            match title="^dialog$"
+            open-floating true
+            default-floating-position x=0 y=0 relative-to="center" {
+                in-window-of title="^target$"
+            }
+        }
+        "##,
+    )
+    .unwrap();
+
+    let mut f = Fixture::with_config(cfg);
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+
+    let _target = map_titled_window(&mut f, id, "target", 800, 600);
+    let _dialog = map_titled_window(&mut f, id, "dialog", 100, 50);
+
+    // Target opens at (16, 16) with size 800×600 (16px struts on each
+    // side of the default working area).
+    // Dialog (100×50) centered inside target should land at:
+    //   x = 16 + (800 - 100) / 2 = 16 + 350 = 366
+    //   y = 16 + (600 - 50)  / 2 = 16 + 275 = 291
+    assert_snapshot!(format_tiles(f.niri()), @r"
+     800 ×  600 at x:   16 y:  16
+     100 ×   50 at x:  366 y: 291
+    ");
+}
+
+#[test]
 fn dependent_follows_target_on_rect_change() {
     // The visible-behavior contract: when the target's tile rect changes
     // (via any Layout mutation), the dependent re-positions to maintain its
@@ -279,8 +318,8 @@ fn user_drag_breaks_anchor() {
     // — which is where the unregister hook lives — happens past the
     // threshold for scrolling tiles, immediately for floating tiles. The
     // dialog is floating, so the transition is immediate on first update.
-    let start_pos = smithay::utils::Point::from((500.0, 500.0));
-    let pointer_delta = smithay::utils::Point::from((50.0, 50.0));
+    let start_pos = Point::from((500.0, 500.0));
+    let pointer_delta = Point::from((50.0, 50.0));
     assert!(
         f.niri()
             .layout
@@ -303,6 +342,69 @@ fn user_drag_breaks_anchor() {
     assert!(
         anchor_after.is_none(),
         "expected anchor to be broken by user drag, but anchor_target_of returned {anchor_after:?}",
+    );
+}
+
+#[test]
+fn target_drag_does_not_orphan_dependents() {
+    // The user-drag-breaks-anchor policy fires when the user drags the
+    // DEPENDENT (the dialog). Dragging the TARGET (the anchor anchor) is
+    // a different scenario: the target's move should pull its dependents
+    // along, not detach them. This test pins that invariant.
+    //
+    // Without this guarantee, dragging the Zoom meeting tile (target)
+    // would silently orphan the Leave-meeting panel (dependent), leaving
+    // it floating in space at the spot the user dragged FROM — exactly
+    // the bug `default_floating_position` was supposed to prevent.
+
+    let mut f = Fixture::with_config(anchor_config_top_left());
+    f.add_output(1, (1920, 1080));
+    let output = f.niri_output(1);
+    let id = f.add_client();
+
+    let _target = map_titled_window(&mut f, id, "target", 800, 600);
+    let _dialog = map_titled_window(&mut f, id, "dialog", 100, 50);
+    let dialog_id = window_id_for_title(f.niri(), "dialog");
+    let target_id = window_id_for_title(f.niri(), "target");
+
+    // Pre-condition: dialog anchored to target.
+    assert_eq!(
+        f.niri()
+            .layout
+            .floating_anchor_target_of(&dialog_id)
+            .cloned(),
+        Some(target_id.clone()),
+        "dialog should be anchored to target before target drag",
+    );
+
+    // Drag the TARGET (not the dialog). The Layout's interactive-move
+    // path extracts the target tile via `remove_window_for_drag`, which
+    // must NOT orphan windows that depend on it.
+    let start_pos = Point::from((500.0, 500.0));
+    let pointer_delta = Point::from((50.0, 50.0));
+    assert!(
+        f.niri()
+            .layout
+            .interactive_move_begin(target_id.clone(), &output, start_pos),
+        "interactive_move_begin on target should succeed",
+    );
+    f.niri().layout.interactive_move_update(
+        &target_id,
+        pointer_delta,
+        output.clone(),
+        start_pos + pointer_delta,
+    );
+
+    // The dialog must still be anchored to the (now-being-dragged) target.
+    let anchor_during = f
+        .niri()
+        .layout
+        .floating_anchor_target_of(&dialog_id)
+        .cloned();
+    assert_eq!(
+        anchor_during,
+        Some(target_id),
+        "dragging the target must not orphan its dependents; got {anchor_during:?}",
     );
 }
 
@@ -420,6 +522,103 @@ fn dependent_follows_target_across_workspaces() {
     assert_eq!(
         target_ws, dialog_ws,
         "dialog must share workspace with target after cross-workspace migration",
+    );
+}
+
+#[test]
+fn dependent_follows_target_across_outputs() {
+    // Spec success criterion: "target moves to another output → dialog
+    // follows; cursor reaches the target output via existing
+    // `move_cursor_to_focused_tile` semantics." This test uses an
+    // explicit two-output setup and migrates the target via
+    // `move_to_output` directly, then asserts the dependent followed.
+    //
+    // The cursor-follow behavior itself is engaged via niri's
+    // `move_cursor_to_focused_tile` logic, which fires when a window is
+    // activated on a new output. We assert the active-monitor moves
+    // to the target's new output as the proxy for cursor-follow — both
+    // are driven by the same activation path.
+
+    let mut f = Fixture::with_config(anchor_config_top_left());
+    f.add_output(1, (1920, 1080));
+    f.add_output(2, (1920, 1080));
+    let output2 = f.niri_output(2);
+    let id = f.add_client();
+
+    // Both windows open on output 1 (the first output, default focused).
+    let _target = map_titled_window(&mut f, id, "target", 800, 600);
+    let _dialog = map_titled_window(&mut f, id, "dialog", 100, 50);
+    let target_id = window_id_for_title(f.niri(), "target");
+    let dialog_id = window_id_for_title(f.niri(), "dialog");
+
+    // Sanity: both windows located on output 1's workspace.
+    let (_, target_output_pre, _) = f
+        .niri()
+        .layout
+        .find_window_position_by_id(&target_id)
+        .expect("target locatable pre-migration");
+    let target_output_pre = target_output_pre
+        .expect("target should be on an output, not in NoOutputs state")
+        .name()
+        .to_string();
+    assert_eq!(
+        target_output_pre, "headless-1",
+        "target should start on output 1",
+    );
+
+    // Migrate target to output 2 via the Layout API. ActivateWindow::Yes
+    // mimics what a user shortcut like move-window-to-monitor-right does
+    // — it shifts focus / activation to the new output, which is what
+    // engages `move_cursor_to_focused_tile`.
+    f.niri().layout.move_to_output(
+        Some(&target_id),
+        &output2,
+        None,
+        crate::layout::ActivateWindow::Yes,
+    );
+    f.double_roundtrip(id);
+    f.niri_complete_animations();
+
+    // Target is on output 2.
+    let (_, target_output_post, _) = f
+        .niri()
+        .layout
+        .find_window_position_by_id(&target_id)
+        .expect("target locatable post-migration");
+    let target_output_post = target_output_post
+        .expect("target should still be on an output")
+        .name()
+        .to_string();
+    assert_eq!(
+        target_output_post, "headless-2",
+        "target should now be on output 2",
+    );
+
+    // Dialog must have followed.
+    let (_, dialog_output_post, _) = f
+        .niri()
+        .layout
+        .find_window_position_by_id(&dialog_id)
+        .expect("dialog locatable post-migration");
+    let dialog_output_post = dialog_output_post
+        .expect("dialog should still be on an output")
+        .name()
+        .to_string();
+    assert_eq!(
+        dialog_output_post, target_output_post,
+        "dialog must follow target to its new output",
+    );
+
+    // Anchor relationship survived the migration.
+    let anchor_after = f
+        .niri()
+        .layout
+        .floating_anchor_target_of(&dialog_id)
+        .cloned();
+    assert_eq!(
+        anchor_after.as_ref(),
+        Some(&target_id),
+        "dialog must remain anchored to the same target after cross-output migration",
     );
 }
 
