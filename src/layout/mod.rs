@@ -840,6 +840,24 @@ impl<W: LayoutElement> Layout<W> {
         None
     }
 
+    /// Locate a workspace's `(output, index_within_monitor)` pair by id. Used
+    /// by [`Self::notify_tile_changed`] to migrate an anchor dependent to its
+    /// target's workspace via [`Self::move_to_output`]. Returns `None` for
+    /// the `NoOutputs` monitor-set case.
+    pub fn workspace_position(&self, ws_id: WorkspaceId) -> Option<(&Output, usize)> {
+        match &self.monitor_set {
+            MonitorSet::Normal { monitors, .. } => {
+                for monitor in monitors {
+                    if let Some(idx) = monitor.workspaces.iter().position(|ws| ws.id() == ws_id) {
+                        return Some((monitor.output(), idx));
+                    }
+                }
+                None
+            }
+            MonitorSet::NoOutputs { .. } => None,
+        }
+    }
+
     /// The tile's visual rectangle in its workspace's view coordinates.
     /// Used by [`Self::reposition_floating_anchor_dependent`] to obtain the
     /// reference rectangle for cross-window positioning math.
@@ -857,13 +875,18 @@ impl<W: LayoutElement> Layout<W> {
 
     /// Event-driven re-position entry point: `target_id`'s tile rect has
     /// just changed to `new_rect`. Reposition all dependents anchored to
-    /// `target_id` to track the new rect.
+    /// `target_id` to track the new rect. If a dependent's current workspace
+    /// differs from the target's workspace, migrate the dependent first
+    /// ("follow target across workspaces and outputs" per the epic) and
+    /// then reposition inside the new workspace.
     ///
     /// Complexity is O(dependents_of_target × workspaces): the
     /// reverse-index lookup is O(1), then per-dependent the cached
     /// workspace lookup avoids the tile scan but still walks
     /// `workspaces_mut()` (typically ≤ 10) to find the right one to dispatch
     /// the reposition into. Workspaces themselves are not searched by tile.
+    /// The target's workspace position is resolved ONCE per call (not per
+    /// dependent).
     ///
     /// Updates the target-rect cache so the next sweep can compare-and-skip
     /// when the rect hasn't moved.
@@ -883,19 +906,53 @@ impl<W: LayoutElement> Layout<W> {
             return;
         }
 
+        // Snapshot target's current workspace + output position. Done once
+        // per event (not per dependent). The Output is cloned so it can be
+        // held across the mutable `move_to_output` call below.
+        let target_location: Option<(WorkspaceId, Output, usize)> = self
+            .find_workspace_and_output_by_id(target_id)
+            .and_then(|(ws_id, _output_ref)| {
+                self.workspace_position(ws_id)
+                    .map(|(output, idx)| (ws_id, output.clone(), idx))
+            });
+
         for dependent in dependents {
-            // Cached workspace lookup — set at registration, kept current by
-            // any future workspace-migration hook. If missing (shouldn't
-            // happen) we silently skip rather than mis-target.
-            let Some(ws_id) = self
+            // Cached workspace lookup — set at registration, kept current
+            // here by the migration update below.
+            let Some(dep_ws_id) = self
                 .floating_anchor_dependent_workspaces
                 .get(&dependent)
                 .copied()
             else {
                 continue;
             };
+
+            // Cross-workspace/output follow: if the target migrated to a
+            // different workspace, move the dependent to that workspace
+            // before repositioning. Updates the cache so future events
+            // dispatch to the new workspace.
+            let final_ws_id = if let Some((target_ws_id, target_output, target_ws_idx)) =
+                target_location.as_ref()
+            {
+                if dep_ws_id != *target_ws_id {
+                    self.move_to_output(
+                        Some(&dependent),
+                        target_output,
+                        Some(*target_ws_idx),
+                        ActivateWindow::No,
+                    );
+                    self.floating_anchor_dependent_workspaces
+                        .insert(dependent.clone(), *target_ws_id);
+                    *target_ws_id
+                } else {
+                    dep_ws_id
+                }
+            } else {
+                dep_ws_id
+            };
+
             for ws in self.workspaces_mut() {
-                if ws.id() == ws_id {
+                if ws.id() == final_ws_id {
                     ws.reposition_floating_anchored(&dependent, new_rect);
                     break;
                 }
