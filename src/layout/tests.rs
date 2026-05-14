@@ -761,6 +761,19 @@ enum Op {
     // cross-checks the forward/reverse maps and the workspace cache stay
     // consistent regardless of what other Op variants do (close, move,
     // workspace migrations).
+    //
+    // These intentionally drive the Layout-level anchor API directly
+    // (`register_floating_anchor` / `unregister_floating_anchor` /
+    // `orphan_floating_anchor_dependents_of`) rather than the full
+    // PositionFrame::Window config path. The full path lives in
+    // `src/handlers/compositor.rs` (the dialog-map hook) and reaches into
+    // `resolve_position_frame_target`; the compositor isn't reachable from
+    // `Layout<TestWindow>` and would require a full Smithay/Wayland test
+    // fixture, which is what the `src/tests/cross_window_anchor.rs`
+    // integration tests cover. The proptest's role is to randomize the
+    // *Layout-level* invariants under arbitrary interleaving with
+    // CloseWindow / MoveWindowToOutput / MoveWindowToWorkspace / etc.;
+    // the integration tests cover the resolver + map-hook glue end to end.
     RegisterFloatingAnchor {
         #[proptest(strategy = "1..=5usize")]
         dependent: usize,
@@ -4096,36 +4109,58 @@ mod floating_anchor_layer_tests {
     fn orphan_dependent_is_not_re_registered_when_new_match_arrives() {
         // MRU-at-open-time policy: after target B drops, dependent A is
         // orphaned, and a later target C that *would* have matched A's rule
-        // does not cause A to be re-anchored. The policy is enforced because
-        // re-resolution only happens at dialog map; orphaned dependents just
-        // stay where they are.
+        // does not cause A to be re-anchored. The policy lives at the
+        // compositor map-hook boundary (re-resolution only happens at
+        // dialog map; orphaned dependents stay where they are).
         //
-        // Layer-2 expression of that policy: drive the Layout API directly,
-        // confirm anchor state stays cleared.
+        // This Layer-2 test pins the Layout-level invariant: orphaning does
+        // not park A in any "pending re-resolve" set, so subsequent unrelated
+        // mutations of the anchor index do not silently re-bind A. The test
+        // structure uses a positive control to prove the no-auto-rebind
+        // property is meaningful — register_floating_anchor still CAN bind
+        // A to a new target, it just doesn't happen on its own.
 
         let mut layout: Layout<TestWindow> = Layout::default();
         // Register A=1 anchored to B=2.
         layout.register_floating_anchor(1, 2);
         assert_eq!(layout.floating_anchor_target_of(&1), Some(&2));
 
-        // B closes -> orphan A. A is no longer anchored.
+        // B closes → orphan A.
         let orphans = layout.orphan_floating_anchor_dependents_of(&2);
         assert_eq!(orphans, vec![1]);
         assert_eq!(layout.floating_anchor_target_of(&1), None);
 
-        // A new candidate C=3 enters the system. The compositor's map-hook
-        // is what would re-register A if MRU were re-evaluated post-open;
-        // since A is already mapped, no re-registration happens. We confirm
-        // by checking A's anchor stays cleared. The system would only
-        // register A → C if some code path called register_floating_anchor
-        // again — none does.
+        // A new candidate C=3 arrives. The only Layout API that could re-
+        // register A is `register_floating_anchor` itself — which is called
+        // exclusively from the compositor's map-hook on NEW window mapping.
+        // Since A is already mapped, the map-hook doesn't fire for A. We
+        // simulate "C arrives, gets matched against some OTHER rule" by
+        // registering an unrelated dependent D=4 against C=3. That exercises
+        // the anchor index without going through any code path that could
+        // re-bind A.
+        layout.register_floating_anchor(4, 3);
+        assert_eq!(layout.floating_anchor_target_of(&4), Some(&3));
+        // The unrelated registration must NOT have side-effected A's state.
         assert_eq!(
             layout.floating_anchor_target_of(&1),
             None,
-            "orphaned dependent must NOT be re-anchored to a new matching target",
+            "orphaned dependent must NOT be re-anchored as a side effect of \
+             unrelated anchor activity",
         );
-        // Also confirm C is not registered as a target of anything (we never
-        // registered anything against it).
-        assert!(layout.floating_anchor_dependents_of(&3).next().is_none());
+
+        // Positive control: register_floating_anchor IS able to re-bind A
+        // to a new target. The previous assertion is only meaningful because
+        // the API can do this on demand — it just doesn't fire automatically.
+        layout.register_floating_anchor(1, 3);
+        assert_eq!(
+            layout.floating_anchor_target_of(&1),
+            Some(&3),
+            "positive control: explicit register_floating_anchor must rebind",
+        );
+
+        // Re-orphan via the target-close path; A returns to None.
+        layout.orphan_floating_anchor_dependents_of(&3);
+        assert_eq!(layout.floating_anchor_target_of(&1), None);
+        assert_eq!(layout.floating_anchor_target_of(&4), None);
     }
 }
