@@ -32,6 +32,7 @@
 //! don't want an unassuming workspace to end up on it.
 
 use std::collections::HashMap;
+use std::hash::Hash;
 use std::mem;
 use std::rc::Rc;
 use std::time::Duration;
@@ -75,6 +76,7 @@ use crate::utils::{
 };
 use crate::window::ResolvedWindowRules;
 
+pub mod anchor;
 pub mod closing_window;
 pub mod floating;
 pub mod focus_ring;
@@ -130,7 +132,11 @@ pub enum SizingMode {
 
 pub trait LayoutElement {
     /// Type that can be used as a unique ID of this element.
-    type Id: PartialEq + std::fmt::Debug + Clone;
+    ///
+    /// `Eq + Hash` are required for the cross-window anchor index (which keys
+    /// HashMaps by id). Production `MappedId` and the test `usize` both
+    /// satisfy this with their existing derives.
+    type Id: PartialEq + Eq + Hash + std::fmt::Debug + Clone;
 
     /// Unique ID of this element.
     fn id(&self) -> &Self::Id;
@@ -366,6 +372,12 @@ pub struct Layout<W: LayoutElement> {
     overview_progress: Option<OverviewProgress>,
     /// Configurable properties of the layout.
     options: Rc<Options>,
+    /// Cross-window anchor relationships introduced by `PositionFrame::Window`.
+    /// Populated at dialog-map time when the resolver returns a target;
+    /// consulted by the geometry-changed handler to find dependents in O(1).
+    /// Cleared on dialog close and on target close (the latter orphans the
+    /// dependent without re-resolving — per the MRU-at-open-time policy).
+    floating_anchors: anchor::AnchorIndex<W::Id>,
 }
 
 #[derive(Debug)]
@@ -704,6 +716,7 @@ impl<W: LayoutElement> Layout<W> {
             overview_open: false,
             overview_progress: None,
             options: Rc::new(options),
+            floating_anchors: anchor::AnchorIndex::new(),
         }
     }
 
@@ -729,7 +742,66 @@ impl<W: LayoutElement> Layout<W> {
             overview_open: false,
             overview_progress: None,
             options: opts,
+            floating_anchors: anchor::AnchorIndex::new(),
         }
+    }
+
+    /// Register `dependent` as anchored to `target` for cross-window
+    /// positioning. Emits `warn!` if the resulting chain is recursive
+    /// (target itself is anchored). See `anchor::AnchorIndex` for details.
+    pub fn register_floating_anchor(&mut self, dependent: W::Id, target: W::Id) {
+        let outcome = self
+            .floating_anchors
+            .register(dependent.clone(), target.clone());
+        if let anchor::RegisterOutcome::RecursiveAnchor { chain_depth } = outcome {
+            warn!(
+                "registered recursive floating-anchor chain (depth {}): {:?} -> {:?}",
+                chain_depth, dependent, target,
+            );
+        }
+    }
+
+    /// Drop `dependent`'s anchor registration. Call on dialog close.
+    pub fn unregister_floating_anchor(&mut self, dependent: &W::Id) {
+        self.floating_anchors.unregister(dependent);
+    }
+
+    /// `target` is closing — return its dependents (callers will need to
+    /// clear any per-dependent anchor state held outside this index) and
+    /// drop them from the anchor maps. Dependents are NOT re-resolved to a
+    /// new target (MRU-at-open-time policy).
+    pub fn orphan_floating_anchor_dependents_of(&mut self, target: &W::Id) -> Vec<W::Id> {
+        self.floating_anchors.orphan_dependents_of(target)
+    }
+
+    /// What target is `dependent` anchored to? `None` if free-floating.
+    pub fn floating_anchor_target_of(&self, dependent: &W::Id) -> Option<&W::Id> {
+        self.floating_anchors.target_of(dependent)
+    }
+
+    /// Iterate dependents anchored to `target`. Used by the geometry-changed
+    /// handler in the next task to find who needs to be re-placed.
+    pub fn floating_anchor_dependents_of(
+        &self,
+        target: &W::Id,
+    ) -> impl Iterator<Item = &W::Id> + '_ {
+        self.floating_anchors.dependents_of(target)
+    }
+
+    /// Find the workspace id and output containing a window by its id. Used
+    /// at dialog-map time to fill in the dependent's anchor context for
+    /// [`crate::window::resolve_position_frame_target`]. O(N) over mapped
+    /// windows; only intended for the rare dialog-map path.
+    pub fn find_workspace_and_output_by_id(
+        &self,
+        id: &W::Id,
+    ) -> Option<(WorkspaceId, Option<&Output>)> {
+        for (monitor, _idx, workspace) in self.workspaces() {
+            if workspace.has_window(id) {
+                return Some((workspace.id(), monitor.map(|m| m.output())));
+            }
+        }
+        None
     }
 
     pub fn add_output(&mut self, output: Output, layout_config: Option<LayoutPart>) {
