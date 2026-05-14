@@ -860,21 +860,8 @@ impl XdgShellHandler for State {
         let was_active = active_window == Some(&window);
 
         self.niri.window_mru_ui.remove_window(id);
-        // Cross-window anchor cleanup (mirror of the compositor.rs unmap
-        // path) — keyed on the smithay `Window` (LayoutElement::Id), not
-        // the MappedId.
-        self.niri.layout.unregister_floating_anchor(&window);
-        let orphaned = self
-            .niri
-            .layout
-            .orphan_floating_anchor_dependents_of(&window);
-        if !orphaned.is_empty() {
-            debug!(
-                "floating-anchor target (MappedId={:?}) destroyed; orphaned {} dependents",
-                id,
-                orphaned.len(),
-            );
-        }
+        // Cross-window anchor cleanup (drop as dependent, orphan as target)
+        // is handled inside `Layout::remove_window` itself.
         self.niri.layout.remove_window(&window, transaction.clone());
 
         let surface = surface.wl_surface();

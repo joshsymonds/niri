@@ -1392,6 +1392,15 @@ impl<W: LayoutElement> Layout<W> {
         window: &W::Id,
         transaction: Transaction,
     ) -> Option<RemovedTile<W>> {
+        // Cross-window anchor cleanup: any Layout-level window removal must
+        // tear down anchor state — both for windows that were dependents
+        // (drop their forward entry) and for windows that were targets
+        // (orphan their dependents). Centralizing here means proptests and
+        // any other direct caller get the cleanup for free; the compositor
+        // / xdg_shell unmap handlers no longer need to call it separately.
+        self.unregister_floating_anchor(window);
+        let _ = self.orphan_floating_anchor_dependents_of(window);
+
         if let Some(state) = &self.interactive_move {
             match state {
                 InteractiveMoveState::Starting { window_id, .. } => {
@@ -2855,6 +2864,54 @@ impl<W: LayoutElement> Layout<W> {
                 }
                 saw_view_offset_gesture = has_view_offset_gesture;
             }
+        }
+
+        // Cross-window anchor invariants. The forward map and reverse map
+        // must agree, and the auxiliary caches must stay in sync with the
+        // forward map's membership.
+        for (dependent, target) in self.floating_anchors.forward_pairs() {
+            assert!(
+                self.has_window(dependent),
+                "anchor forward-map dependent {dependent:?} must be a mapped window"
+            );
+            assert!(
+                self.has_window(target),
+                "anchor forward-map target {target:?} must be a mapped window"
+            );
+            assert!(
+                self.floating_anchors
+                    .dependents_of(target)
+                    .any(|d| d == dependent),
+                "anchor forward-map entry {dependent:?} -> {target:?} must have a \
+                 matching reverse-map entry",
+            );
+            let cached_ws = self.floating_anchor_dependent_workspaces.get(dependent);
+            assert!(
+                cached_ws.is_some(),
+                "anchor dependent {dependent:?} must have a cached workspace entry",
+            );
+        }
+
+        // Every reverse-map entry's dependents must point back to that target
+        // in the forward map.
+        for target in self.floating_anchors.targets_iter() {
+            for dependent in self.floating_anchors.dependents_of(target) {
+                assert_eq!(
+                    self.floating_anchors.target_of(dependent),
+                    Some(target),
+                    "anchor reverse-map entry {target:?} -> {dependent:?} must have a \
+                     matching forward-map entry"
+                );
+            }
+        }
+
+        // The dependent-workspace cache should not contain stale entries for
+        // ids that are no longer registered as dependents.
+        for dependent in self.floating_anchor_dependent_workspaces.keys() {
+            assert!(
+                self.floating_anchors.target_of(dependent).is_some(),
+                "stale workspace-cache entry for {dependent:?} (not a registered dependent)",
+            );
         }
     }
 

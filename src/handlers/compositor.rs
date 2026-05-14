@@ -347,23 +347,9 @@ impl CompositorHandler for State {
 
                     self.niri.window_mru_ui.remove_window(id);
                     // Cross-window anchor cleanup: the smithay `Window` is the
-                    // LayoutElement::Id for Mapped and the key the anchor
-                    // index uses. This window may be a dependent (drop its
-                    // registration) AND/OR a target (orphan its dependents —
-                    // they keep their last computed position per the
-                    // no-re-resolution policy).
-                    self.niri.layout.unregister_floating_anchor(&window);
-                    let orphaned = self
-                        .niri
-                        .layout
-                        .orphan_floating_anchor_dependents_of(&window);
-                    if !orphaned.is_empty() {
-                        debug!(
-                            "floating-anchor target (MappedId={:?}) closed; orphaned {} dependents",
-                            id,
-                            orphaned.len(),
-                        );
-                    }
+                    // Cross-window anchor cleanup (drop as dependent, orphan
+                    // as target) is handled inside `Layout::remove_window`
+                    // itself — see comment there.
                     self.niri.layout.remove_window(&window, transaction.clone());
                     self.add_default_dmabuf_pre_commit_hook(surface);
 
