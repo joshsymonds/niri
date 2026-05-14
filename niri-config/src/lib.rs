@@ -2478,6 +2478,68 @@ mod tests {
         assert_eq!(target.is_floating, Some(true));
     }
 
+    #[test]
+    fn parse_in_window_of_with_is_focused() {
+        let config = do_parse(
+            r##"
+            window-rule {
+                default-floating-position x=0 y=0 relative-to="top" {
+                    in-window-of app-id="^Zoom$" is-focused=true
+                }
+            }
+            "##,
+        );
+        let target = config.window_rules[0]
+            .default_floating_position
+            .as_ref()
+            .and_then(|p| p.in_window_of.as_ref())
+            .expect("in-window-of should have parsed");
+        assert_eq!(target.is_focused, Some(true));
+        assert_eq!(target.app_id.as_ref().map(|r| r.0.as_str()), Some("^Zoom$"));
+    }
+
+    #[test]
+    fn parse_in_window_of_with_is_active() {
+        let config = do_parse(
+            r##"
+            window-rule {
+                default-floating-position x=0 y=0 relative-to="top" {
+                    in-window-of is-active=false is-active-in-column=true
+                }
+            }
+            "##,
+        );
+        let target = config.window_rules[0]
+            .default_floating_position
+            .as_ref()
+            .and_then(|p| p.in_window_of.as_ref())
+            .expect("in-window-of should have parsed");
+        assert_eq!(target.is_active, Some(false));
+        assert_eq!(target.is_active_in_column, Some(true));
+    }
+
+    #[test]
+    fn parse_in_window_of_with_at_startup() {
+        let config = do_parse(
+            r##"
+            window-rule {
+                default-floating-position x=0 y=0 relative-to="top" {
+                    in-window-of title="^Slack$" at-startup=true is-urgent=true is-window-cast-target=false
+                }
+            }
+            "##,
+        );
+        let target = config.window_rules[0]
+            .default_floating_position
+            .as_ref()
+            .and_then(|p| p.in_window_of.as_ref())
+            .expect("in-window-of should have parsed");
+        assert_eq!(target.at_startup, Some(true));
+        assert_eq!(target.is_urgent, Some(true));
+        assert_eq!(target.is_window_cast_target, Some(false));
+        assert_eq!(target.title.as_ref().map(|r| r.0.as_str()), Some("^Slack$"));
+    }
+
     fn diff_lines(expected: &str, actual: &str) -> String {
         let mut output = String::new();
         let mut in_change = false;

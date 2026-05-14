@@ -352,28 +352,23 @@ mod tests {
     #[test]
     fn pathological_cycle_terminates_at_depth_cap() {
         let mut idx = Idx::new();
-        // Build a cycle: 1 → 2, 2 → 1. The second register sees chain
-        // 1 → 2 from cursor = forward.get(1) = Some(&2), forward.get(2) =
-        // None (we're about to overwrite). Actually we're testing the cap,
-        // so let's force a longer chain manually then add the cycle.
         idx.register(1, 2);
-        // Manually insert a cycle for the test. We don't have a public
-        // method for this; just exercise the path by registering 2 → 1.
+        // register(2, 1): walk from forward.get(&1) = Some(&2). depth becomes
+        // 2; forward.get(&2) is None (not yet registered), so the walk ends.
         let outcome = idx.register(2, 1);
-        // Chain from 1: 1 → 2, but 2's target was about to be overwritten,
-        // so during depth-walk we follow 1 → 2 → (forward.get(2) is None at
-        // walk time because we haven't inserted yet). So depth = 2.
-        // We're not measuring depth perfectly here -- the assertion is just
-        // that registration terminates and yields *some* valid outcome.
-        assert!(matches!(
-            outcome,
-            RegisterOutcome::Registered | RegisterOutcome::RecursiveAnchor { .. }
-        ));
-        // Re-register 1 → 2 again to actually form the cycle, then verify
-        // a third registration still terminates.
+        assert_eq!(outcome, RegisterOutcome::RecursiveAnchor { chain_depth: 2 });
+        // Re-register 1 → 2. Forward map already has 1 → 2 and 2 → 1, so the
+        // depth-walk from target=2 follows 2 → 1 → 2 → 1 → ... and must
+        // terminate at MAX_CHAIN_DEPTH (16). A regression that raises the
+        // cap, removes the cap entirely, or short-circuits cycles via
+        // visited-set detection would change the depth value and trip this
+        // assertion — that's the whole point of asserting the exact cap.
         let outcome2 = idx.register(1, 2);
-        // Now forward map is 1 → 2 and 2 → 1, both directions. Re-walking
-        // would loop forever without the cap. Verify it terminates.
-        assert!(matches!(outcome2, RegisterOutcome::RecursiveAnchor { .. }));
+        assert_eq!(
+            outcome2,
+            RegisterOutcome::RecursiveAnchor {
+                chain_depth: MAX_CHAIN_DEPTH,
+            }
+        );
     }
 }
