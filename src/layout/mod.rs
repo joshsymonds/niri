@@ -378,13 +378,6 @@ pub struct Layout<W: LayoutElement> {
     /// Cleared on dialog close and on target close (the latter orphans the
     /// dependent without re-resolving — per the MRU-at-open-time policy).
     floating_anchors: anchor::AnchorIndex<W::Id>,
-    /// Per-dependent cached workspace lookup. Maintained in lockstep with
-    /// `floating_anchors`'s forward map: populated at registration so the
-    /// reposition hot path avoids the O(workspaces × tiles) scan, cleared on
-    /// unregister or orphan. Workspace migrations (e.g. dependent moves to
-    /// another workspace) update this entry; if it's stale on lookup the
-    /// reposition silently no-ops rather than mis-targeting.
-    floating_anchor_dependent_workspaces: HashMap<W::Id, WorkspaceId>,
     /// Per-target last-seen rect cache. Filled by [`Self::notify_tile_changed`]
     /// on each event; the sweep in [`Self::resweep_all_anchor_dependents`]
     /// compares the current rect to this cache to skip repositioning targets
@@ -731,7 +724,6 @@ impl<W: LayoutElement> Layout<W> {
             overview_progress: None,
             options: Rc::new(options),
             floating_anchors: anchor::AnchorIndex::new(),
-            floating_anchor_dependent_workspaces: HashMap::new(),
             floating_anchor_target_rects: HashMap::new(),
         }
     }
@@ -759,15 +751,14 @@ impl<W: LayoutElement> Layout<W> {
             overview_progress: None,
             options: opts,
             floating_anchors: anchor::AnchorIndex::new(),
-            floating_anchor_dependent_workspaces: HashMap::new(),
             floating_anchor_target_rects: HashMap::new(),
         }
     }
 
     /// Register `dependent` as anchored to `target` for cross-window
-    /// positioning. Caches `dependent`'s current workspace and `target`'s
-    /// current rect so subsequent re-position events can skip the O(N) tile
-    /// scan. Emits `warn!` if the resulting chain is recursive.
+    /// positioning. Caches `target`'s current rect so the per-frame sweep
+    /// can compare-and-skip when the rect hasn't moved. Emits `warn!` if
+    /// the resulting chain is recursive.
     pub fn register_floating_anchor(&mut self, dependent: W::Id, target: W::Id) {
         let outcome = self
             .floating_anchors
@@ -778,11 +769,6 @@ impl<W: LayoutElement> Layout<W> {
                 chain_depth, dependent, target,
             );
         }
-        // Populate caches so the hot path can avoid the workspace scan.
-        if let Some((ws_id, _)) = self.find_workspace_and_output_by_id(&dependent) {
-            self.floating_anchor_dependent_workspaces
-                .insert(dependent, ws_id);
-        }
         if let Some(rect) = self.tile_visual_rect(&target) {
             self.floating_anchor_target_rects.insert(target, rect);
         }
@@ -790,8 +776,19 @@ impl<W: LayoutElement> Layout<W> {
 
     /// Drop `dependent`'s anchor registration. Call on dialog close.
     pub fn unregister_floating_anchor(&mut self, dependent: &W::Id) {
+        // Capture the old target before we lose the link, so we can prune
+        // its rect cache if the dependent we're removing was the last one.
+        let old_target = self.floating_anchors.target_of(dependent).cloned();
         self.floating_anchors.unregister(dependent);
-        self.floating_anchor_dependent_workspaces.remove(dependent);
+        if let Some(target) = old_target {
+            // If the unregister emptied the reverse set, the target is no
+            // longer on `targets_iter()`, so the per-frame sweep wouldn't
+            // touch its cached rect anyway — but the entry would still
+            // accumulate. Prune it to keep the cache bounded.
+            if !self.floating_anchors.is_registered_as_target(&target) {
+                self.floating_anchor_target_rects.remove(&target);
+            }
+        }
     }
 
     /// `target` is closing — return its dependents (callers will need to
@@ -800,11 +797,7 @@ impl<W: LayoutElement> Layout<W> {
     /// new target (MRU-at-open-time policy).
     pub fn orphan_floating_anchor_dependents_of(&mut self, target: &W::Id) -> Vec<W::Id> {
         let orphans = self.floating_anchors.orphan_dependents_of(target);
-        // Each orphan loses its workspace cache (it's no longer anchored).
-        for orphan in &orphans {
-            self.floating_anchor_dependent_workspaces.remove(orphan);
-        }
-        // Target's rect cache is also no longer needed.
+        // Target's rect cache is no longer needed.
         self.floating_anchor_target_rects.remove(target);
         orphans
     }
@@ -850,6 +843,27 @@ impl<W: LayoutElement> Layout<W> {
                 for monitor in monitors {
                     if let Some(idx) = monitor.workspaces.iter().position(|ws| ws.id() == ws_id) {
                         return Some((monitor.output(), idx));
+                    }
+                }
+                None
+            }
+            MonitorSet::NoOutputs { .. } => None,
+        }
+    }
+
+    /// Locate a window's `(WorkspaceId, &Output, index_within_monitor)` in a
+    /// single monitor-set walk. Used by [`Self::notify_tile_changed`] to
+    /// resolve the target's full position without paying for two passes
+    /// (one for `(ws_id, &Output)`, one for `(workspace_idx_in_monitor)`).
+    /// Returns `None` for the `NoOutputs` monitor-set case or unknown id.
+    pub fn find_window_position_by_id(&self, id: &W::Id) -> Option<(WorkspaceId, &Output, usize)> {
+        match &self.monitor_set {
+            MonitorSet::Normal { monitors, .. } => {
+                for monitor in monitors {
+                    for (idx, ws) in monitor.workspaces.iter().enumerate() {
+                        if ws.has_window(id) {
+                            return Some((ws.id(), monitor.output(), idx));
+                        }
                     }
                 }
                 None
@@ -910,27 +924,32 @@ impl<W: LayoutElement> Layout<W> {
         // per event (not per dependent). The Output is cloned so it can be
         // held across the mutable `move_to_output` call below.
         let target_location: Option<(WorkspaceId, Output, usize)> = self
-            .find_workspace_and_output_by_id(target_id)
-            .and_then(|(ws_id, _output_ref)| {
-                self.workspace_position(ws_id)
-                    .map(|(output, idx)| (ws_id, output.clone(), idx))
-            });
+            .find_window_position_by_id(target_id)
+            .map(|(ws_id, output, idx)| (ws_id, output.clone(), idx));
 
         for dependent in dependents {
-            // Cached workspace lookup — set at registration, kept current
-            // here by the migration update below.
-            let Some(dep_ws_id) = self
-                .floating_anchor_dependent_workspaces
-                .get(&dependent)
-                .copied()
-            else {
+            // Look up the dependent's current workspace fresh each event.
+            // Cheap enough at notify frequency, and avoids the staleness
+            // class of bugs where a cached entry diverged from reality
+            // because some non-anchor code path (move-to-workspace,
+            // move-to-output, etc.) migrated the dependent.
+            let Some((dep_ws_id, _, _)) = self.find_window_position_by_id(&dependent) else {
                 continue;
             };
 
             // Cross-workspace/output follow: if the target migrated to a
             // different workspace, move the dependent to that workspace
-            // before repositioning. Updates the cache so future events
-            // dispatch to the new workspace.
+            // before repositioning.
+            //
+            // We pass `ActivateWindow::Smart` so the dependent activates
+            // only if it was the focused window on the active monitor pre-
+            // move (matching the convention used by other `move_to_output`
+            // call sites in `src/input/mod.rs`). In the common case — the
+            // target moves cross-output via a user input action that has
+            // already activated the new output — Smart resolves to No, so
+            // the dependent migrates passively and the cursor follows the
+            // target's activation. If the user instead drags the dependent
+            // itself, Smart activates the new output.
             let final_ws_id = if let Some((target_ws_id, target_output, target_ws_idx)) =
                 target_location.as_ref()
             {
@@ -939,10 +958,8 @@ impl<W: LayoutElement> Layout<W> {
                         Some(&dependent),
                         target_output,
                         Some(*target_ws_idx),
-                        ActivateWindow::No,
+                        ActivateWindow::Smart,
                     );
-                    self.floating_anchor_dependent_workspaces
-                        .insert(dependent.clone(), *target_ws_id);
                     *target_ws_id
                 } else {
                     dep_ws_id
@@ -2867,8 +2884,7 @@ impl<W: LayoutElement> Layout<W> {
         }
 
         // Cross-window anchor invariants. The forward map and reverse map
-        // must agree, and the auxiliary caches must stay in sync with the
-        // forward map's membership.
+        // must agree.
         for (dependent, target) in self.floating_anchors.forward_pairs() {
             assert!(
                 self.has_window(dependent),
@@ -2885,11 +2901,6 @@ impl<W: LayoutElement> Layout<W> {
                 "anchor forward-map entry {dependent:?} -> {target:?} must have a \
                  matching reverse-map entry",
             );
-            let cached_ws = self.floating_anchor_dependent_workspaces.get(dependent);
-            assert!(
-                cached_ws.is_some(),
-                "anchor dependent {dependent:?} must have a cached workspace entry",
-            );
         }
 
         // Every reverse-map entry's dependents must point back to that target
@@ -2903,15 +2914,6 @@ impl<W: LayoutElement> Layout<W> {
                      matching forward-map entry"
                 );
             }
-        }
-
-        // The dependent-workspace cache should not contain stale entries for
-        // ids that are no longer registered as dependents.
-        for dependent in self.floating_anchor_dependent_workspaces.keys() {
-            assert!(
-                self.floating_anchors.target_of(dependent).is_some(),
-                "stale workspace-cache entry for {dependent:?} (not a registered dependent)",
-            );
         }
     }
 
@@ -4358,15 +4360,11 @@ impl<W: LayoutElement> Layout<W> {
                         .animate_move_from((tile_pos - new_tile_pos).downscale(zoom));
                 }
 
-                // User committed to dragging — break any cross-window anchor
-                // so future target moves don't yank the dialog back to the
-                // anchored position. Per the epic's user-drag-breaks-anchor
-                // policy. No-op if `window` wasn't registered. We unregister
-                // ONLY at the Starting -> Moving transition (i.e. past the
-                // drag-start threshold for scrolling tiles, immediate for
-                // floating); brief clicks or below-threshold jiggles don't
-                // break the anchor.
-                self.unregister_floating_anchor(window);
+                // Cross-window anchor cleanup for the drag-start: `remove_window`
+                // above already unregistered this id, so by this point the
+                // dialog is no longer tracking a target. The user-drag-breaks-
+                // anchor policy is satisfied as a side effect of removing the
+                // tile before re-inserting it into the move state.
 
                 self.interactive_move = Some(InteractiveMoveState::Moving(data));
             }

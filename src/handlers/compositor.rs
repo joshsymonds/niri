@@ -222,7 +222,12 @@ impl CompositorHandler for State {
                             .rules()
                             .default_floating_position
                             .as_ref()
-                            .and_then(|p| p.in_window_of.clone())
+                            .and_then(|p| match p.frame() {
+                                niri_config::PositionFrame::Window { target } => {
+                                    Some(target.clone())
+                                }
+                                niri_config::PositionFrame::WorkingArea => None,
+                            })
                     } else {
                         None
                     };
@@ -269,6 +274,11 @@ impl CompositorHandler for State {
                                 self.niri
                                     .layout
                                     .reposition_floating_anchor_dependent(&anchor_dependent_window);
+                            } else {
+                                debug!(
+                                    "in-window-of matched no candidate window; falling back to \
+                                     working-area positioning",
+                                );
                             }
                         }
                     }
@@ -346,7 +356,6 @@ impl CompositorHandler for State {
                         .stop_casts_for_target(CastTarget::Window { id: id.get() });
 
                     self.niri.window_mru_ui.remove_window(id);
-                    // Cross-window anchor cleanup: the smithay `Window` is the
                     // Cross-window anchor cleanup (drop as dependent, orphan
                     // as target) is handled inside `Layout::remove_window`
                     // itself — see comment there.
