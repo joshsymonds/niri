@@ -35,6 +35,126 @@ use crate::utils::{
     baba_is_float_offset, round_logical_in_physical, round_logical_in_physical_max1,
 };
 
+/// Decomposes `tile - window` into up to 4 axis-aligned rectangles for the
+/// fullscreen backdrop. Each returned rect carries a `CornerRadius` whose
+/// non-zero corners coincide with the tile's outer corners; corners that
+/// butt against the window's edge are zero.
+///
+/// Order: left bar, right bar, top middle, bottom middle. Strips that would
+/// have zero width or height are omitted. If `window` doesn't overlap `tile`,
+/// the whole `tile` is returned with its full corner radius.
+fn backdrop_clip_rects(
+    tile: Rectangle<f64, Logical>,
+    window: Rectangle<f64, Logical>,
+    tile_corner_radius: CornerRadius,
+) -> Vec<(Rectangle<f64, Logical>, CornerRadius)> {
+    let tile_left = tile.loc.x;
+    let tile_top = tile.loc.y;
+    let tile_right = tile_left + tile.size.w;
+    let tile_bottom = tile_top + tile.size.h;
+
+    // Clamp the window into the tile so we never produce negative-dimension strips.
+    let window_left = window.loc.x.clamp(tile_left, tile_right);
+    let window_top = window.loc.y.clamp(tile_top, tile_bottom);
+    let window_right = (window.loc.x + window.size.w).clamp(tile_left, tile_right);
+    let window_bottom = (window.loc.y + window.size.h).clamp(tile_top, tile_bottom);
+
+    // Window doesn't overlap the tile: backdrop is the whole tile.
+    if window_right <= window_left || window_bottom <= window_top {
+        return vec![(tile, tile_corner_radius)];
+    }
+
+    let mut out = Vec::with_capacity(4);
+
+    // Left bar: covers the strip left of the window, full tile height.
+    // Owns the tile's top-left and bottom-left outer corners.
+    if window_left > tile_left {
+        out.push((
+            Rectangle::new(
+                Point::from((tile_left, tile_top)),
+                Size::from((window_left - tile_left, tile_bottom - tile_top)),
+            ),
+            CornerRadius {
+                top_left: tile_corner_radius.top_left,
+                top_right: 0.,
+                bottom_right: 0.,
+                bottom_left: tile_corner_radius.bottom_left,
+            },
+        ));
+    }
+
+    // Right bar: strip right of the window, full tile height.
+    // Owns the tile's top-right and bottom-right outer corners.
+    if window_right < tile_right {
+        out.push((
+            Rectangle::new(
+                Point::from((window_right, tile_top)),
+                Size::from((tile_right - window_right, tile_bottom - tile_top)),
+            ),
+            CornerRadius {
+                top_left: 0.,
+                top_right: tile_corner_radius.top_right,
+                bottom_right: tile_corner_radius.bottom_right,
+                bottom_left: 0.,
+            },
+        ));
+    }
+
+    // Top middle: above the window, between (or replacing) the bars. Owns a
+    // tile-outer corner only on a side where no L/R bar exists (i.e., the
+    // window is flush with that tile edge). When both bars exist, both top
+    // corners butt against bars and stay sharp; when neither bar exists
+    // (letterbox), both top corners are tile-outer corners.
+    if window_top > tile_top {
+        out.push((
+            Rectangle::new(
+                Point::from((window_left, tile_top)),
+                Size::from((window_right - window_left, window_top - tile_top)),
+            ),
+            CornerRadius {
+                top_left: if window_left <= tile_left {
+                    tile_corner_radius.top_left
+                } else {
+                    0.
+                },
+                top_right: if window_right >= tile_right {
+                    tile_corner_radius.top_right
+                } else {
+                    0.
+                },
+                bottom_right: 0.,
+                bottom_left: 0.,
+            },
+        ));
+    }
+
+    // Bottom middle: symmetric to top middle.
+    if window_bottom < tile_bottom {
+        out.push((
+            Rectangle::new(
+                Point::from((window_left, window_bottom)),
+                Size::from((window_right - window_left, tile_bottom - window_bottom)),
+            ),
+            CornerRadius {
+                top_left: 0.,
+                top_right: 0.,
+                bottom_right: if window_right >= tile_right {
+                    tile_corner_radius.bottom_right
+                } else {
+                    0.
+                },
+                bottom_left: if window_left <= tile_left {
+                    tile_corner_radius.bottom_left
+                } else {
+                    0.
+                },
+            },
+        ));
+    }
+
+    out
+}
+
 /// Toplevel window with decorations.
 #[derive(Debug)]
 pub struct Tile<W: LayoutElement> {
@@ -1241,6 +1361,13 @@ impl<W: LayoutElement> Tile<W> {
         if fullscreen_progress > 0. {
             let alpha = fullscreen_progress as f32;
 
+            // Opt-in: when set, clip the backdrop to tile-minus-window so translucent fullscreen
+            // windows (e.g. kitty with background_opacity<1.0) compose against the wallpaper
+            // instead of the opaque backdrop. Off by default to match xdg-shell's requirement
+            // that the compositor hide other screen content behind a non-opaque fullscreen
+            // surface.
+            let clip_backdrop = rules.clip_fullscreen_backdrop_to_window == Some(true);
+
             // During the un/fullscreen animation, render a border element in order to use the
             // animated corner radius.
             if fullscreen_progress < 1. && has_border_shader {
@@ -1251,23 +1378,59 @@ impl<W: LayoutElement> Tile<W> {
                     .expanded_by(border_width as f32)
                     .scaled_by(1. - expanded_progress as f32);
 
-                let size = self.fullscreen_backdrop.size();
                 let color = self.fullscreen_backdrop.color();
-                let elem = BorderRenderElement::new(
-                    size,
-                    Rectangle::from_size(size),
-                    GradientInterpolation::default(),
-                    Color::from_color32f(color),
-                    Color::from_color32f(color),
-                    0.,
-                    Rectangle::from_size(size),
-                    0.,
-                    radius,
-                    scale.x as f32,
-                    alpha,
-                )
-                .with_location(location);
-                push(elem.into());
+
+                if clip_backdrop {
+                    // Per-strip CornerRadius preserves the animated tile-outer-corner shrink:
+                    // strips at tile corners get the radius, strips that butt against the
+                    // window's edge stay sharp.
+                    let tile_rect = Rectangle::new(location, self.fullscreen_backdrop.size());
+                    for (geo, per_rect_radius) in backdrop_clip_rects(tile_rect, area, radius) {
+                        let elem = BorderRenderElement::new(
+                            geo.size,
+                            Rectangle::from_size(geo.size),
+                            GradientInterpolation::default(),
+                            Color::from_color32f(color),
+                            Color::from_color32f(color),
+                            0.,
+                            Rectangle::from_size(geo.size),
+                            0.,
+                            per_rect_radius,
+                            scale.x as f32,
+                            alpha,
+                        )
+                        .with_location(geo.loc);
+                        push(elem.into());
+                    }
+                } else {
+                    let size = self.fullscreen_backdrop.size();
+                    let elem = BorderRenderElement::new(
+                        size,
+                        Rectangle::from_size(size),
+                        GradientInterpolation::default(),
+                        Color::from_color32f(color),
+                        Color::from_color32f(color),
+                        0.,
+                        Rectangle::from_size(size),
+                        0.,
+                        radius,
+                        scale.x as f32,
+                        alpha,
+                    )
+                    .with_location(location);
+                    push(elem.into());
+                }
+            } else if clip_backdrop {
+                let tile_rect = Rectangle::new(location, self.fullscreen_backdrop.size());
+                for (geo, _) in backdrop_clip_rects(tile_rect, area, CornerRadius::default()) {
+                    let elem = SolidColorRenderElement::from_buffer_at(
+                        &self.fullscreen_backdrop,
+                        geo,
+                        alpha,
+                        Kind::Unspecified,
+                    );
+                    push(elem.into());
+                }
             } else {
                 let elem = SolidColorRenderElement::from_buffer(
                     &self.fullscreen_backdrop,
@@ -1554,5 +1717,240 @@ impl<W: LayoutElement> Tile<W> {
         let rounded = size.to_physical_precise_round(scale).to_logical(scale);
         assert_abs_diff_eq!(size.w, rounded.w, epsilon = 1e-5);
         assert_abs_diff_eq!(size.h, rounded.h, epsilon = 1e-5);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use niri_config::CornerRadius;
+    use smithay::utils::{Logical, Point, Rectangle, Size};
+
+    use super::backdrop_clip_rects;
+
+    fn rect(x: f64, y: f64, w: f64, h: f64) -> Rectangle<f64, Logical> {
+        Rectangle::new(Point::from((x, y)), Size::from((w, h)))
+    }
+
+    fn zero_radius() -> CornerRadius {
+        CornerRadius::default()
+    }
+
+    fn uniform_radius(r: f32) -> CornerRadius {
+        CornerRadius::from(r)
+    }
+
+    #[test]
+    fn backdrop_clip_rects_window_equals_tile_returns_empty() {
+        let tile = rect(0., 0., 1920., 1080.);
+        let window = tile;
+        let result = backdrop_clip_rects(tile, window, zero_radius());
+        assert!(result.is_empty(), "expected no rects, got {:?}", result);
+    }
+
+    #[test]
+    fn backdrop_clip_rects_window_centered_returns_4_strips() {
+        let tile = rect(0., 0., 1920., 1080.);
+        let window = rect(480., 270., 960., 540.);
+        let result = backdrop_clip_rects(tile, window, zero_radius());
+
+        assert_eq!(result.len(), 4, "expected 4 strips, got {:?}", result);
+
+        // Documented decomposition: left bar, right bar, top middle, bottom middle.
+        assert_eq!(result[0].0, rect(0., 0., 480., 1080.), "left bar");
+        assert_eq!(result[1].0, rect(1440., 0., 480., 1080.), "right bar");
+        assert_eq!(result[2].0, rect(480., 0., 960., 270.), "top middle");
+        assert_eq!(result[3].0, rect(480., 810., 960., 270.), "bottom middle");
+
+        // None of the strips intersects the window.
+        for (r, _) in &result {
+            assert!(
+                r.intersection(window).is_none(),
+                "strip {:?} intersects window {:?}",
+                r,
+                window
+            );
+        }
+
+        // With zero input radius, every strip's CornerRadius is all-zero.
+        for (_, cr) in &result {
+            assert_eq!(*cr, zero_radius());
+        }
+    }
+
+    #[test]
+    fn backdrop_clip_rects_aspect_ratio_left_right_only() {
+        // Window is full-height, narrower-width: aspect-ratio padding bars on left and right only.
+        let tile = rect(0., 0., 1920., 1080.);
+        let window = rect(240., 0., 1440., 1080.);
+        let result = backdrop_clip_rects(tile, window, zero_radius());
+
+        assert_eq!(result.len(), 2, "expected 2 strips, got {:?}", result);
+        assert_eq!(result[0].0, rect(0., 0., 240., 1080.), "left bar");
+        assert_eq!(result[1].0, rect(1680., 0., 240., 1080.), "right bar");
+    }
+
+    #[test]
+    fn backdrop_clip_rects_window_flush_top_and_bottom_returns_2_strips() {
+        // Window full-width, partial-height (vertical letterbox geometry):
+        // only top middle and bottom middle strips, no L/R bars.
+        let tile = rect(0., 0., 1920., 1080.);
+        let window = rect(0., 100., 1920., 880.);
+        let result = backdrop_clip_rects(tile, window, zero_radius());
+
+        assert_eq!(result.len(), 2, "expected 2 strips, got {:?}", result);
+        assert_eq!(result[0].0, rect(0., 0., 1920., 100.), "top middle");
+        assert_eq!(result[1].0, rect(0., 980., 1920., 100.), "bottom middle");
+    }
+
+    #[test]
+    fn backdrop_clip_rects_window_flush_one_edge_returns_3_strips() {
+        // Window flush against the left tile edge, partial in the other directions.
+        // Expected: right bar + top middle + bottom middle (no left bar).
+        // The top/bottom middle strips' LEFT edges coincide with tile-outer-left,
+        // so they own the top-left/bottom-left tile corners respectively.
+        let tile = rect(0., 0., 1920., 1080.);
+        let window = rect(0., 100., 1500., 880.);
+        let result = backdrop_clip_rects(tile, window, uniform_radius(16.));
+
+        assert_eq!(result.len(), 3, "expected 3 strips, got {:?}", result);
+
+        // Right bar: owns top-right and bottom-right tile corners; left edge butts window.
+        assert_eq!(result[0].0, rect(1500., 0., 420., 1080.), "right bar geo");
+        assert_eq!(
+            result[0].1,
+            CornerRadius {
+                top_left: 0.,
+                top_right: 16.,
+                bottom_right: 16.,
+                bottom_left: 0.,
+            },
+            "right bar should round only its outer (right) corners"
+        );
+
+        // Top middle: left edge is tile-outer-left (window flush there), so top-left rounded.
+        // Right edge butts against window, so top-right is sharp.
+        assert_eq!(result[1].0, rect(0., 0., 1500., 100.), "top middle geo");
+        assert_eq!(
+            result[1].1,
+            CornerRadius {
+                top_left: 16.,
+                top_right: 0.,
+                bottom_right: 0.,
+                bottom_left: 0.,
+            },
+            "top middle should round its top-left (= tile top-left)"
+        );
+
+        // Bottom middle: symmetric, bottom-left rounded.
+        assert_eq!(
+            result[2].0,
+            rect(0., 980., 1500., 100.),
+            "bottom middle geo"
+        );
+        assert_eq!(
+            result[2].1,
+            CornerRadius {
+                top_left: 0.,
+                top_right: 0.,
+                bottom_right: 0.,
+                bottom_left: 16.,
+            },
+            "bottom middle should round its bottom-left (= tile bottom-left)"
+        );
+    }
+
+    #[test]
+    fn backdrop_clip_rects_letterbox_top_bottom_own_all_tile_outer_corners() {
+        // Window same width as tile, smaller height: only top + bottom middle strips.
+        // No L/R bars exist, so the top/bottom strips own all 4 tile-outer corners.
+        let tile = rect(0., 0., 1920., 1080.);
+        let window = rect(0., 100., 1920., 880.);
+        let result = backdrop_clip_rects(tile, window, uniform_radius(16.));
+
+        assert_eq!(result.len(), 2, "expected 2 strips, got {:?}", result);
+
+        // Top middle owns top-left AND top-right tile-outer corners (both side bars absent).
+        assert_eq!(
+            result[0].1,
+            CornerRadius {
+                top_left: 16.,
+                top_right: 16.,
+                bottom_right: 0.,
+                bottom_left: 0.,
+            },
+            "top middle should round both top tile-outer corners when L/R bars are absent"
+        );
+
+        // Bottom middle owns bottom-left AND bottom-right.
+        assert_eq!(
+            result[1].1,
+            CornerRadius {
+                top_left: 0.,
+                top_right: 0.,
+                bottom_right: 16.,
+                bottom_left: 16.,
+            },
+            "bottom middle should round both bottom tile-outer corners when L/R bars are absent"
+        );
+    }
+
+    #[test]
+    fn backdrop_clip_rects_window_outside_tile_returns_whole_tile() {
+        // Window doesn't overlap tile: backdrop is the entire tile with full radius.
+        let tile = rect(0., 0., 1920., 1080.);
+        let window = rect(-500., -500., 100., 100.);
+        let result = backdrop_clip_rects(tile, window, uniform_radius(16.));
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, tile);
+        assert_eq!(result[0].1, uniform_radius(16.));
+    }
+
+    #[test]
+    fn backdrop_clip_rects_nonzero_radius_only_outer_corners_rounded() {
+        let tile = rect(0., 0., 1920., 1080.);
+        let window = rect(480., 270., 960., 540.);
+        let result = backdrop_clip_rects(tile, window, uniform_radius(16.));
+
+        assert_eq!(result.len(), 4);
+
+        // Left bar owns the tile's top-left and bottom-left corners; right edge butts against the
+        // window.
+        assert_eq!(
+            result[0].1,
+            CornerRadius {
+                top_left: 16.,
+                top_right: 0.,
+                bottom_right: 0.,
+                bottom_left: 16.,
+            },
+            "left bar should round only its outer (left) corners"
+        );
+
+        // Right bar owns top-right and bottom-right tile corners.
+        assert_eq!(
+            result[1].1,
+            CornerRadius {
+                top_left: 0.,
+                top_right: 16.,
+                bottom_right: 16.,
+                bottom_left: 0.,
+            },
+            "right bar should round only its outer (right) corners"
+        );
+
+        // Top middle is sandwiched between the two bars and the window — no tile-outer corners.
+        assert_eq!(
+            result[2].1,
+            zero_radius(),
+            "top middle should have no rounded corners"
+        );
+
+        // Bottom middle: same reasoning.
+        assert_eq!(
+            result[3].1,
+            zero_radius(),
+            "bottom middle should have no rounded corners"
+        );
     }
 }
