@@ -894,6 +894,7 @@ mod tests {
                 default-column-display "tabbed"
                 default-floating-position x=100 y=-200 relative-to="bottom-left"
                 clip-fullscreen-backdrop-to-window true
+                block-pointer-constraints true
 
                 focus-ring {
                     off
@@ -1867,6 +1868,9 @@ mod tests {
                     ),
                     baba_is_float: None,
                     block_out_from: None,
+                    block_pointer_constraints: Some(
+                        true,
+                    ),
                     variable_refresh_rate: None,
                     default_column_display: Some(
                         Tabbed,

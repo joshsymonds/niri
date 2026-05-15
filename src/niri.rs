@@ -6090,6 +6090,22 @@ impl Niri {
                 return;
             }
 
+            // Window-rule opt-out: a window matched by a rule with
+            // `block-pointer-constraints true` short-circuits before
+            // activation. The constraint stays bound but inactive for its
+            // lifetime, so the protocol behaves like a silent no-op.
+            // Resolving root + looking up the window rules is deferred
+            // until here so the no-constraint fast path (every pointer
+            // motion over a surface without a constraint) doesn't pay
+            // for it. Pointer-constraints can be requested on subsurfaces
+            // / popups, but rules resolve on the toplevel.
+            let root = self.find_root_shell_surface(surface);
+            if let Some((mapped, _)) = self.layout.find_window_and_output(&root) {
+                if mapped.rules().block_pointer_constraints == Some(true) {
+                    return;
+                }
+            }
+
             // Constraint does not apply if not within region.
             if let Some(region) = constraint.region() {
                 let pointer_pos = pointer.current_location();
