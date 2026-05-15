@@ -1857,6 +1857,7 @@ mod tests {
                     clip_to_geometry: None,
                     baba_is_float: None,
                     block_out_from: None,
+                    block_focus_cursor_warp: None,
                     variable_refresh_rate: None,
                     default_column_display: Some(
                         Tabbed,
@@ -2465,6 +2466,44 @@ mod tests {
         -                0.6666666666666666,
         +                0.66667,
         "#,
+        );
+    }
+
+    #[test]
+    fn parse_block_focus_cursor_warp() {
+        // Pins the `block-focus-cursor-warp <bool>` KDL property's round
+        // trip to `WindowRule::block_focus_cursor_warp: Option<bool>`. The
+        // gate at the cursor-warp call site (in src/niri.rs) is wired in a
+        // follow-up task; this test exists to lock in the parser shape
+        // first.
+        let config = do_parse(
+            r##"
+            window-rule {
+                match app-id="^Zoom$" title="^annotate_toolbar$"
+                block-focus-cursor-warp true
+            }
+            window-rule {
+                match app-id="quiet"
+                block-focus-cursor-warp false
+            }
+            window-rule {
+                match app-id="absent"
+            }
+            "##,
+        );
+        assert_eq!(
+            config.window_rules[0].block_focus_cursor_warp,
+            Some(true),
+            "block-focus-cursor-warp true must parse to Some(true)",
+        );
+        assert_eq!(
+            config.window_rules[1].block_focus_cursor_warp,
+            Some(false),
+            "block-focus-cursor-warp false must parse to Some(false)",
+        );
+        assert_eq!(
+            config.window_rules[2].block_focus_cursor_warp, None,
+            "omitting the property must leave the field as None",
         );
     }
 }

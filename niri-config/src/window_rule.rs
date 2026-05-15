@@ -65,6 +65,15 @@ pub struct WindowRule {
     pub baba_is_float: Option<bool>,
     #[knuffel(child, unwrap(argument))]
     pub block_out_from: Option<BlockOutFrom>,
+    /// Suppress niri's cursor-follows-focus warp for this window. When set,
+    /// `Niri::maybe_warp_cursor_to_focus` short-circuits before calling
+    /// `move_cursor_to_focused_tile` if the focus target's resolved rule
+    /// has this flag. Motivated by Zoom's `annotate_toolbar` overlay
+    /// repeatedly grabbing focus via xdg-activation during screen-share-
+    /// with-annotation, which made the cursor snap to the toolbar's center
+    /// every time a user moved the mouse.
+    #[knuffel(child, unwrap(argument))]
+    pub block_focus_cursor_warp: Option<bool>,
     #[knuffel(child, unwrap(argument))]
     pub variable_refresh_rate: Option<bool>,
     #[knuffel(child, unwrap(argument, str))]
