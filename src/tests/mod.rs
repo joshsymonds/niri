@@ -6,6 +6,7 @@ mod server;
 
 mod animations;
 mod cross_window_anchor;
+mod cursor_warp_gate;
 mod floating;
 mod fullscreen;
 mod layer_shell;
