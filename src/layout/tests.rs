@@ -4238,6 +4238,105 @@ fn move_column_to_output_target_col_idx_none_preserves_after_active_behavior() {
     );
 }
 
+fn make_focus_flash_options() -> Options {
+    Options {
+        layout: niri_config::Layout {
+            focus_flash: Some(niri_config::FocusFlash {
+                flash_color: niri_config::Color::from_rgba8_unpremul(0xff, 0xe6, 0x80, 0xff),
+                pulse_duration_ms: 100,
+                pulses: niri_config::Pulses(1),
+                edge_width: 4,
+                sides: niri_config::FocusFlashSides::default(),
+            }),
+            ..Default::default()
+        },
+        ..Options::default()
+    }
+}
+
+// Trigger detection (focus-actually-changed → fire) lives in
+// `niri::State::update_keyboard_focus` in `src/niri.rs`, which the layout-level
+// tests can't reach. The tests below exercise the firing API directly via
+// `Layout::start_focus_flash_on_active_monitor`, which is what the chokepoint
+// calls.
+
+#[test]
+fn focus_flash_fires_on_active_monitor() {
+    let mut layout = check_ops_with_options(
+        make_focus_flash_options(),
+        [
+            Op::AddOutput(1),
+            Op::AddWindow {
+                params: TestWindowParams::new(1),
+            },
+        ],
+    );
+
+    layout.start_focus_flash_on_active_monitor();
+
+    let mon = layout.active_monitor_ref().expect("active monitor exists");
+    assert!(
+        mon.focus_flash_anim().is_some(),
+        "start_focus_flash_on_active_monitor should kick off an animation"
+    );
+}
+
+#[test]
+fn focus_flash_does_not_fire_when_disabled() {
+    let mut layout = check_ops([
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+    ]);
+
+    layout.start_focus_flash_on_active_monitor();
+
+    let mon = layout.active_monitor_ref().expect("active monitor exists");
+    assert!(
+        mon.focus_flash_anim().is_none(),
+        "no focus_flash config → no animation"
+    );
+}
+
+#[test]
+fn focus_flash_restart_does_not_pop() {
+    let mut layout =
+        Layout::with_options(Clock::with_time(Duration::ZERO), make_focus_flash_options());
+    check_ops_on_layout(
+        &mut layout,
+        [
+            Op::AddOutput(1),
+            Op::AddWindow {
+                params: TestWindowParams::new(1),
+            },
+        ],
+    );
+
+    layout.start_focus_flash_on_active_monitor();
+    check_ops_on_layout(&mut layout, [Op::AdvanceAnimations { msec_delta: 25 }]);
+
+    let alpha_before = layout
+        .active_monitor_ref()
+        .expect("monitor")
+        .focus_flash_alpha();
+    assert!(
+        alpha_before > 0.0,
+        "alpha should be rising mid-pulse, got {alpha_before}"
+    );
+
+    layout.start_focus_flash_on_active_monitor();
+
+    let alpha_after = layout
+        .active_monitor_ref()
+        .expect("monitor")
+        .focus_flash_alpha();
+    assert!(
+        alpha_after >= alpha_before - 1e-6,
+        "alpha popped on re-trigger: {alpha_before} → {alpha_after}"
+    );
+}
+
 proptest! {
     #![proptest_config(ProptestConfig {
         cases: if std::env::var_os("RUN_SLOW_TESTS").is_none() {

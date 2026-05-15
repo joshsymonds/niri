@@ -576,7 +576,12 @@ impl<W: LayoutElement> Tile<W> {
                 .is_some_and(|alpha| !alpha.anim.is_done())
     }
 
-    pub fn update_render_elements(&mut self, is_active: bool, view_rect: Rectangle<f64, Logical>) {
+    pub fn update_render_elements(
+        &mut self,
+        is_active: bool,
+        view_rect: Rectangle<f64, Logical>,
+        focus_flash: Option<(niri_config::Color, f32)>,
+    ) {
         let rules = self.window.rules();
         let animated_tile_size = self.animated_tile_size();
         let expanded_progress = self.expanded_progress();
@@ -622,6 +627,7 @@ impl<W: LayoutElement> Tile<W> {
             radius,
             self.scale,
             1. - expanded_progress as f32,
+            focus_flash,
         );
 
         let radius = if self.visual_border_width().is_some() {
@@ -654,6 +660,7 @@ impl<W: LayoutElement> Tile<W> {
             radius,
             self.scale,
             1. - expanded_progress as f32,
+            focus_flash,
         );
 
         self.fullscreen_backdrop.resize(animated_tile_size);
@@ -796,7 +803,7 @@ impl<W: LayoutElement> Tile<W> {
         self.sizing_mode
     }
 
-    fn fullscreen_progress(&self) -> f64 {
+    pub(super) fn fullscreen_progress(&self) -> f64 {
         if let Some(resize) = &self.resize_animation {
             if let Some(anim) = &resize.fullscreen_progress {
                 return anim.clamped_value().clamp(0., 1.);

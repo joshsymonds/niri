@@ -1513,6 +1513,18 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn activate_window(&mut self, window: &W::Id) {
+        self.activate_window_with(window, Workspace::activate_window);
+    }
+
+    pub fn activate_window_without_raising(&mut self, window: &W::Id) {
+        self.activate_window_with(window, Workspace::activate_window_without_raising);
+    }
+
+    fn activate_window_with(
+        &mut self,
+        window: &W::Id,
+        mut activate: impl FnMut(&mut Workspace<W>, &W::Id) -> bool,
+    ) {
         if let Some(InteractiveMoveState::Moving(move_)) = &self.interactive_move {
             if move_.tile.window().id() == window {
                 return;
@@ -1530,7 +1542,7 @@ impl<W: LayoutElement> Layout<W> {
 
         for (monitor_idx, mon) in monitors.iter_mut().enumerate() {
             for (workspace_idx, ws) in mon.workspaces.iter_mut().enumerate() {
-                if ws.activate_window(window) {
+                if activate(ws, window) {
                     *active_monitor_idx = monitor_idx;
 
                     // If currently in the middle of a vertical swipe between the target workspace
@@ -1548,13 +1560,18 @@ impl<W: LayoutElement> Layout<W> {
         }
     }
 
-    pub fn activate_window_without_raising(&mut self, window: &W::Id) {
-        if let Some(InteractiveMoveState::Moving(move_)) = &self.interactive_move {
-            if move_.tile.window().id() == window {
-                return;
-            }
-        }
-
+    /// Fires the focus-flash on the active monitor when `focus-flash` is configured.
+    ///
+    /// Called from `niri::State::update_keyboard_focus` after the global keyboard
+    /// focus changes — that's the single chokepoint every focus path (alt-tab,
+    /// direction keys, workspace switch, output switch, programmatic activation,
+    /// auto-refocus on close) flows through. Layout doesn't poll, doesn't observe,
+    /// doesn't instrument: it just exposes the trigger so a focus-aware caller can
+    /// invoke it.
+    pub fn start_focus_flash_on_active_monitor(&mut self) {
+        let Some(cfg) = self.options.layout.focus_flash else {
+            return;
+        };
         let MonitorSet::Normal {
             monitors,
             active_monitor_idx,
@@ -1563,24 +1580,8 @@ impl<W: LayoutElement> Layout<W> {
         else {
             return;
         };
-
-        for (monitor_idx, mon) in monitors.iter_mut().enumerate() {
-            for (workspace_idx, ws) in mon.workspaces.iter_mut().enumerate() {
-                if ws.activate_window_without_raising(window) {
-                    *active_monitor_idx = monitor_idx;
-
-                    // If currently in the middle of a vertical swipe between the target workspace
-                    // and some other, don't switch the workspace.
-                    match &mon.workspace_switch {
-                        Some(WorkspaceSwitch::Gesture(gesture))
-                            if gesture.current_idx.floor() == workspace_idx as f64
-                                || gesture.current_idx.ceil() == workspace_idx as f64 => {}
-                        _ => mon.switch_workspace(workspace_idx),
-                    }
-
-                    return;
-                }
-            }
+        if let Some(mon) = monitors.get_mut(*active_monitor_idx) {
+            mon.start_focus_flash(&cfg);
         }
     }
 
@@ -2806,7 +2807,7 @@ impl<W: LayoutElement> Layout<W> {
                     Rectangle::new(pos_within_output.upscale(-1.), output_size(&move_.output))
                         .downscale(zoom);
 
-                move_.tile.update_render_elements(true, view_rect);
+                move_.tile.update_render_elements(true, view_rect, None);
             }
         }
 
@@ -4699,7 +4700,7 @@ impl<W: LayoutElement> Layout<W> {
                 let view_rect =
                     Rectangle::new(pos_within_output.upscale(-1.), output_size(&move_.output))
                         .downscale(zoom);
-                move_.tile.update_render_elements(false, view_rect);
+                move_.tile.update_render_elements(false, view_rect, None);
 
                 move_.tile.store_unmap_snapshot_if_empty(
                     renderer,

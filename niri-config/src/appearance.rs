@@ -60,6 +60,17 @@ impl Color {
         let [r, g, b, a] = [self.r, self.g, self.b, self.a];
         [r * a, g * a, b * a, a]
     }
+
+    /// Per-channel linear interpolation in unpremultiplied space, with `t` clamped to `[0, 1]`.
+    pub fn lerp(self, other: Self, t: f32) -> Self {
+        let t = t.clamp(0., 1.);
+        Self {
+            r: self.r + (other.r - self.r) * t,
+            g: self.g + (other.g - self.g) * t,
+            b: self.b + (other.b - self.b) * t,
+            a: self.a + (other.a - self.a) * t,
+        }
+    }
 }
 
 impl Mul<f32> for Color {
@@ -722,6 +733,179 @@ impl MergeWith<Self> for TabIndicatorRule {
     }
 }
 
+#[derive(knuffel::Decode, Debug, Clone, Copy, PartialEq)]
+pub struct FocusFlash {
+    #[knuffel(child)]
+    pub flash_color: Color,
+    #[knuffel(child, unwrap(argument), default = 200)]
+    pub pulse_duration_ms: u32,
+    #[knuffel(child, unwrap(argument), default)]
+    pub pulses: Pulses,
+    #[knuffel(child, unwrap(argument), default = 4)]
+    pub edge_width: u16,
+    #[knuffel(child, default)]
+    pub sides: FocusFlashSides,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Pulses(pub u8);
+
+impl Default for Pulses {
+    fn default() -> Self {
+        Self(1)
+    }
+}
+
+impl<S: knuffel::traits::ErrorSpan> knuffel::DecodeScalar<S> for Pulses {
+    fn type_check(
+        type_name: &Option<knuffel::span::Spanned<knuffel::ast::TypeName, S>>,
+        ctx: &mut knuffel::decode::Context<S>,
+    ) {
+        if let Some(type_name) = &type_name {
+            ctx.emit_error(DecodeError::unexpected(
+                type_name,
+                "type name",
+                "no type name expected for this node",
+            ));
+        }
+    }
+
+    fn raw_decode(
+        val: &knuffel::span::Spanned<knuffel::ast::Literal, S>,
+        ctx: &mut knuffel::decode::Context<S>,
+    ) -> Result<Self, DecodeError<S>> {
+        match &**val {
+            knuffel::ast::Literal::Int(value) => match value.try_into() {
+                Ok(v) => {
+                    if (1u8..=5).contains(&v) {
+                        Ok(Pulses(v))
+                    } else {
+                        ctx.emit_error(DecodeError::conversion(
+                            val,
+                            "pulses must be between 1 and 5",
+                        ));
+                        Ok(Pulses::default())
+                    }
+                }
+                Err(e) => {
+                    ctx.emit_error(DecodeError::conversion(val, e));
+                    Ok(Pulses::default())
+                }
+            },
+            _ => {
+                ctx.emit_error(DecodeError::scalar_kind(knuffel::decode::Kind::Int, val));
+                Ok(Pulses::default())
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FocusFlashSides {
+    pub top: bool,
+    pub bottom: bool,
+    pub left: bool,
+    pub right: bool,
+}
+
+impl Default for FocusFlashSides {
+    fn default() -> Self {
+        Self {
+            top: true,
+            bottom: true,
+            left: true,
+            right: true,
+        }
+    }
+}
+
+impl<S> knuffel::Decode<S> for FocusFlashSides
+where
+    S: knuffel::traits::ErrorSpan,
+{
+    fn decode_node(
+        node: &knuffel::ast::SpannedNode<S>,
+        ctx: &mut knuffel::decode::Context<S>,
+    ) -> Result<Self, DecodeError<S>> {
+        if let Some(type_name) = &node.type_name {
+            ctx.emit_error(DecodeError::unexpected(
+                type_name,
+                "type name",
+                "no type name expected for this node",
+            ));
+        }
+
+        for name in node.properties.keys() {
+            ctx.emit_error(DecodeError::unexpected(
+                name,
+                "property",
+                format!("unexpected property `{}`", name.escape_default()),
+            ));
+        }
+        for child in node.children.as_ref().map(|lst| &lst[..]).unwrap_or(&[]) {
+            ctx.emit_error(DecodeError::unexpected(
+                child,
+                "node",
+                format!("unexpected node `{}`", child.node_name.escape_default()),
+            ));
+        }
+
+        let mut sides = Self {
+            top: false,
+            bottom: false,
+            left: false,
+            right: false,
+        };
+        let mut count = 0;
+
+        for arg in node.arguments.iter() {
+            count += 1;
+
+            if let Some(typ) = &arg.type_name {
+                ctx.emit_error(DecodeError::TypeName {
+                    span: typ.span().clone(),
+                    found: Some((**typ).clone()),
+                    expected: knuffel::errors::ExpectedType::no_type(),
+                    rust_type: "str",
+                });
+            }
+
+            match &*arg.literal {
+                knuffel::ast::Literal::String(s) => match s.as_ref() {
+                    "top" => sides.top = true,
+                    "bottom" => sides.bottom = true,
+                    "left" => sides.left = true,
+                    "right" => sides.right = true,
+                    other => {
+                        ctx.emit_error(DecodeError::conversion(
+                            &arg.literal,
+                            format!(
+                                "unknown side `{}`, expected `top`, `bottom`, `left`, or `right`",
+                                other.escape_default()
+                            ),
+                        ));
+                    }
+                },
+                _ => {
+                    ctx.emit_error(DecodeError::scalar_kind(
+                        knuffel::decode::Kind::String,
+                        &arg.literal,
+                    ));
+                }
+            }
+        }
+
+        if count == 0 {
+            ctx.emit_error(DecodeError::missing(
+                node,
+                "expected at least one side: `top`, `bottom`, `left`, or `right`",
+            ));
+        }
+
+        Ok(sides)
+    }
+}
+
 impl FromStr for GradientInterpolation {
     type Err = miette::Error;
 
@@ -1348,5 +1532,34 @@ mod tests {
         )
         "
         );
+    }
+
+    #[test]
+    fn color_lerp_endpoints() {
+        let a = Color::from_rgba8_unpremul(0, 0, 0, 255);
+        let b = Color::from_rgba8_unpremul(255, 255, 255, 255);
+        assert_eq!(a.lerp(b, 0.0), a);
+        assert_eq!(a.lerp(b, 1.0), b);
+    }
+
+    #[test]
+    fn color_lerp_midpoint() {
+        let a = Color::from_rgba8_unpremul(0, 0, 0, 255);
+        let b = Color::from_rgba8_unpremul(255, 255, 255, 255);
+        let mid = a.lerp(b, 0.5);
+        assert!((mid.r - 0.5).abs() < 1e-6);
+        assert!((mid.g - 0.5).abs() < 1e-6);
+        assert!((mid.b - 0.5).abs() < 1e-6);
+        assert!((mid.a - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn color_lerp_clamps_t() {
+        let a = Color::from_rgba8_unpremul(50, 50, 50, 255);
+        let b = Color::from_rgba8_unpremul(100, 100, 100, 255);
+        // t > 1 clamps to 1 → returns b.
+        assert_eq!(a.lerp(b, 5.0), b);
+        // t < 0 clamps to 0 → returns a.
+        assert_eq!(a.lerp(b, -5.0), a);
     }
 }

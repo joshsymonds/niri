@@ -1,7 +1,8 @@
 use std::iter::zip;
 
-use niri_config::{CornerRadius, Gradient, GradientRelativeTo};
+use niri_config::{Color, CornerRadius, Gradient, GradientRelativeTo};
 use smithay::backend::renderer::element::{Element as _, Kind};
+use smithay::backend::renderer::Color32F;
 use smithay::utils::{Logical, Point, Rectangle, Size};
 
 use crate::niri_render_elements;
@@ -65,12 +66,13 @@ impl FocusRing {
         radius: CornerRadius,
         scale: f64,
         alpha: f32,
+        focus_flash: Option<(Color, f32)>,
     ) {
         let width = self.config.width;
         self.full_size = win_size + Size::from((width, width)).upscale(2.);
         self.is_border = is_border;
 
-        let color = if is_urgent {
+        let mut color = if is_urgent {
             self.config.urgent_color
         } else if is_active {
             self.config.active_color
@@ -78,19 +80,35 @@ impl FocusRing {
             self.config.inactive_color
         };
 
-        for buf in &mut self.buffers {
-            buf.set_color(color);
-        }
-
-        let radius = radius.fit_to(self.full_size.w as f32, self.full_size.h as f32);
-
-        let gradient = if is_urgent {
+        let mut gradient = if is_urgent {
             self.config.urgent_gradient
         } else if is_active {
             self.config.active_gradient
         } else {
             self.config.inactive_gradient
         };
+
+        // Lerp `active_color` toward `flash_color` over the symmetric triangle-wave alpha,
+        // producing the visual path `active → flash → active`. The spec describes this as
+        // `inactive → flash → active`, but starting from `inactive` would briefly paint the
+        // newly-focused ring with the inactive color before rising to flash — visually wrong
+        // when focus has just arrived. The starting endpoint is `active` deliberately.
+        // Override the gradient with the lerped solid so the flash isn't competing with a
+        // configured gradient mid-pulse — the gradient resumes once the flash settles.
+        if is_active && !is_urgent {
+            if let Some((flash_color, flash_alpha)) = focus_flash {
+                color = color.lerp(flash_color, flash_alpha);
+                if flash_alpha > 0.0 {
+                    gradient = None;
+                }
+            }
+        }
+
+        for buf in &mut self.buffers {
+            buf.set_color(color);
+        }
+
+        let radius = radius.fit_to(self.full_size.w as f32, self.full_size.h as f32);
 
         self.use_border_shader = radius != CornerRadius::default() || gradient.is_some();
 
@@ -272,5 +290,13 @@ impl FocusRing {
 
     pub fn config(&self) -> &niri_config::FocusRing {
         &self.config
+    }
+
+    /// Color stored in the first buffer after the most recent `update_render_elements` call.
+    ///
+    /// All eight buffers share the same color, so this is the resolved color regardless of
+    /// border vs. focus-ring shape.
+    pub fn buffer_color(&self) -> Color32F {
+        self.buffers[0].color()
     }
 }

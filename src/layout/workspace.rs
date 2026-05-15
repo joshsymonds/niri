@@ -375,13 +375,20 @@ impl<W: LayoutElement> Workspace<W> {
         self.scrolling.are_transitions_ongoing() || self.floating.are_transitions_ongoing()
     }
 
-    pub fn update_render_elements(&mut self, is_active: bool) {
+    pub fn update_render_elements(
+        &mut self,
+        is_active: bool,
+        focus_flash: Option<(niri_config::Color, f32)>,
+    ) {
         self.scrolling
-            .update_render_elements(is_active && !self.floating_is_active.get());
+            .update_render_elements(is_active && !self.floating_is_active.get(), focus_flash);
 
         let view_rect = Rectangle::from_size(self.view_size);
-        self.floating
-            .update_render_elements(is_active && self.floating_is_active.get(), view_rect);
+        self.floating.update_render_elements(
+            is_active && self.floating_is_active.get(),
+            view_rect,
+            focus_flash,
+        );
 
         self.shadow.update_render_elements(
             self.view_size,
@@ -473,6 +480,14 @@ impl<W: LayoutElement> Workspace<W> {
             self.floating.active_window()
         } else {
             self.scrolling.active_window()
+        }
+    }
+
+    pub fn active_tile(&self) -> Option<&Tile<W>> {
+        if self.floating_is_active.get() {
+            self.floating.active_tile()
+        } else {
+            self.scrolling.active_tile()
         }
     }
 
@@ -1701,7 +1716,7 @@ impl<W: LayoutElement> Workspace<W> {
             if tile.window().id() == window {
                 let view_pos = Point::from((-tile_pos.x, -tile_pos.y));
                 let view_rect = Rectangle::new(view_pos, view_size);
-                tile.update_render_elements(false, view_rect);
+                tile.update_render_elements(false, view_rect, None);
                 let xray_pos = xray_pos.offset(tile_pos);
                 tile.store_unmap_snapshot_if_empty(
                     renderer,
