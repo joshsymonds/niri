@@ -120,6 +120,11 @@ pub struct ResolvedWindowRules {
     /// Override whether to set the Tiled xdg-toplevel state on the window.
     pub tiled_state: Option<bool>,
 
+    /// Suppress niri's cursor-follows-focus warp for this window. When the
+    /// resolved value is `Some(true)`, `Niri::maybe_warp_cursor_to_focus`
+    /// short-circuits before calling `move_cursor_to_focused_tile`.
+    pub block_focus_cursor_warp: Option<bool>,
+
     /// Background effect configuration.
     pub background_effect: BackgroundEffect,
 
@@ -301,6 +306,9 @@ impl ResolvedWindowRules {
                 }
                 if let Some(x) = rule.tiled_state {
                     resolved.tiled_state = Some(x);
+                }
+                if let Some(x) = rule.block_focus_cursor_warp {
+                    resolved.block_focus_cursor_warp = Some(x);
                 }
 
                 resolved
