@@ -757,6 +757,41 @@ enum Op {
         #[proptest(strategy = "arbitrary_layout_part().prop_map(Box::new)")]
         layout_config: Box<niri_config::LayoutPart>,
     },
+
+    // Cross-window anchor ops exercising the AnchorIndex + Layout cache
+    // invariants under randomized interleavings. None of these mutate the
+    // anchor index outside of the documented register/unregister/orphan
+    // entry points; the proptest harness's `verify_invariants` then
+    // cross-checks the forward/reverse maps and the workspace cache stay
+    // consistent regardless of what other Op variants do (close, move,
+    // workspace migrations).
+    //
+    // These intentionally drive the Layout-level anchor API directly
+    // (`register_floating_anchor` / `unregister_floating_anchor` /
+    // `orphan_floating_anchor_dependents_of`) rather than the full
+    // PositionFrame::Window config path. The full path lives in
+    // `src/handlers/compositor.rs` (the dialog-map hook) and reaches into
+    // `resolve_position_frame_target`; the compositor isn't reachable from
+    // `Layout<TestWindow>` and would require a full Smithay/Wayland test
+    // fixture, which is what the `src/tests/cross_window_anchor.rs`
+    // integration tests cover. The proptest's role is to randomize the
+    // *Layout-level* invariants under arbitrary interleaving with
+    // CloseWindow / MoveWindowToOutput / MoveWindowToWorkspace / etc.;
+    // the integration tests cover the resolver + map-hook glue end to end.
+    RegisterFloatingAnchor {
+        #[proptest(strategy = "1..=5usize")]
+        dependent: usize,
+        #[proptest(strategy = "1..=5usize")]
+        target: usize,
+    },
+    UnregisterFloatingAnchor {
+        #[proptest(strategy = "1..=5usize")]
+        dependent: usize,
+    },
+    OrphanFloatingAnchorDependentsOf {
+        #[proptest(strategy = "1..=5usize")]
+        target: usize,
+    },
 }
 
 impl Op {
@@ -1630,6 +1665,36 @@ impl Op {
 
                 layout.update_options(options);
             }
+
+            // Cross-window anchor ops. Skip silently if either id isn't a
+            // mapped window — registering against a non-existent target
+            // would violate the invariant; the harness pre-checks here so
+            // verify_invariants stays meaningful when these ops interleave
+            // with arbitrary CloseWindow / AddWindow sequences.
+            Op::RegisterFloatingAnchor { dependent, target } => {
+                // Note: `dependent == target` (self-anchor) is intentionally
+                // allowed here. `AnchorIndex::register` flags it as
+                // `RecursiveAnchor { chain_depth: 1 }` and the Layout-level
+                // wrapper warns — this op exercises that interleaving with
+                // arbitrary CloseWindow / Move / etc. against the
+                // verify_invariants cross-checks.
+                if !layout.has_window(&dependent) || !layout.has_window(&target) {
+                    return;
+                }
+                layout.register_floating_anchor(dependent, target);
+            }
+            Op::UnregisterFloatingAnchor { dependent } => {
+                if !layout.has_window(&dependent) {
+                    return;
+                }
+                layout.unregister_floating_anchor(&dependent);
+            }
+            Op::OrphanFloatingAnchorDependentsOf { target } => {
+                if !layout.has_window(&target) {
+                    return;
+                }
+                layout.orphan_floating_anchor_dependents_of(&target);
+            }
         }
     }
 }
@@ -1754,6 +1819,16 @@ fn operations_dont_panic() {
         Op::ConsumeOrExpelWindowRight { id: None },
         Op::MoveWorkspaceToOutput(1),
         Op::ToggleColumnTabbedDisplay,
+        Op::RegisterFloatingAnchor {
+            dependent: 1,
+            target: 2,
+        },
+        Op::RegisterFloatingAnchor {
+            dependent: 2,
+            target: 3,
+        },
+        Op::UnregisterFloatingAnchor { dependent: 1 },
+        Op::OrphanFloatingAnchorDependentsOf { target: 2 },
     ];
 
     for third in &every_op {
@@ -1933,6 +2008,21 @@ fn operations_from_starting_state_dont_panic() {
         Op::ConsumeOrExpelWindowLeft { id: None },
         Op::ConsumeOrExpelWindowRight { id: None },
         Op::ToggleColumnTabbedDisplay,
+        Op::RegisterFloatingAnchor {
+            dependent: 1,
+            target: 2,
+        },
+        Op::RegisterFloatingAnchor {
+            dependent: 2,
+            target: 3,
+        },
+        Op::RegisterFloatingAnchor {
+            dependent: 4,
+            target: 5,
+        },
+        Op::UnregisterFloatingAnchor { dependent: 1 },
+        Op::OrphanFloatingAnchorDependentsOf { target: 2 },
+        Op::OrphanFloatingAnchorDependentsOf { target: 5 },
     ];
 
     for third in &every_op {
@@ -4360,5 +4450,197 @@ proptest! {
         };
 
         check_ops_with_options(options, ops);
+    }
+}
+
+mod floating_anchor_layer_tests {
+    //! Layer-2 tests for `Layout::register_floating_anchor` and the MRU-at-
+    //! open-time orphan policy. Layer-1 (the `AnchorIndex` itself) is covered
+    //! in `crate::layout::anchor::tests`; these confirm the Layout wrapper
+    //! adds the right side effects (warn! emission on recursive chains;
+    //! orphan stays orphaned even when a new matching target arrives).
+    use std::io;
+    use std::sync::{Arc, Mutex};
+
+    use tracing::subscriber::with_default;
+    use tracing_subscriber::fmt::MakeWriter;
+
+    use super::*;
+
+    /// MakeWriter that appends to a shared byte buffer. Used to capture
+    /// formatted `tracing` events for assertion.
+    #[derive(Clone)]
+    struct VecMakeWriter(Arc<Mutex<Vec<u8>>>);
+
+    struct VecWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl<'a> MakeWriter<'a> for VecMakeWriter {
+        type Writer = VecWriter;
+        fn make_writer(&'a self) -> Self::Writer {
+            VecWriter(Arc::clone(&self.0))
+        }
+    }
+
+    impl io::Write for VecWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Capture tracing events emitted while `f` runs, returning the formatted
+    /// output as a String.
+    fn capture_tracing<F: FnOnce()>(f: F) -> String {
+        let buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt::Subscriber::builder()
+            .with_writer(VecMakeWriter(Arc::clone(&buf)))
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .finish();
+        with_default(subscriber, f);
+        let bytes = buf.lock().unwrap().clone();
+        String::from_utf8(bytes).unwrap()
+    }
+
+    #[test]
+    fn register_floating_anchor_warns_on_recursive_chain() {
+        // Build a chain of depth 2: 3 → 1 → 2. The second register has
+        // forward.get(&1) = Some(&2), so the depth walk yields 2, which
+        // triggers the recursive-anchor warning.
+        let captured = capture_tracing(|| {
+            let mut layout: Layout<TestWindow> = Layout::default();
+            layout.register_floating_anchor(1, 2);
+            layout.register_floating_anchor(3, 1);
+        });
+        assert!(
+            captured.contains("recursive floating-anchor chain"),
+            "expected warn! about recursive chain, captured: {captured:?}",
+        );
+        assert!(
+            captured.contains("WARN"),
+            "expected the captured event at WARN level, captured: {captured:?}",
+        );
+    }
+
+    #[test]
+    fn register_floating_anchor_does_not_warn_on_shallow_chain() {
+        // Two parallel shallow chains: 1 → 2 and 3 → 4. Depth 1 each, no
+        // recursion, so no warn!. This guards against the warning firing on
+        // every register call.
+        let captured = capture_tracing(|| {
+            let mut layout: Layout<TestWindow> = Layout::default();
+            layout.register_floating_anchor(1, 2);
+            layout.register_floating_anchor(3, 4);
+        });
+        assert!(
+            !captured.contains("recursive floating-anchor chain"),
+            "did not expect a recursive-anchor warning, captured: {captured:?}",
+        );
+    }
+
+    #[test]
+    fn orphan_dependent_is_not_re_registered_when_new_match_arrives() {
+        // MRU-at-open-time policy: after target B drops, dependent A is
+        // orphaned, and a later target C that *would* have matched A's rule
+        // does not cause A to be re-anchored. The policy lives at the
+        // compositor map-hook boundary (re-resolution only happens at
+        // dialog map; orphaned dependents stay where they are).
+        //
+        // This Layer-2 test pins the Layout-level invariant: orphaning does
+        // not park A in any "pending re-resolve" set, so subsequent unrelated
+        // mutations of the anchor index do not silently re-bind A. The test
+        // structure uses a positive control to prove the no-auto-rebind
+        // property is meaningful — register_floating_anchor still CAN bind
+        // A to a new target, it just doesn't happen on its own.
+
+        let mut layout: Layout<TestWindow> = Layout::default();
+        // Register A=1 anchored to B=2.
+        layout.register_floating_anchor(1, 2);
+        assert_eq!(layout.floating_anchor_target_of(&1), Some(&2));
+
+        // B closes → orphan A.
+        let orphans = layout.orphan_floating_anchor_dependents_of(&2);
+        assert_eq!(orphans, vec![1]);
+        assert_eq!(layout.floating_anchor_target_of(&1), None);
+
+        // A new candidate C=3 arrives. The only Layout API that could re-
+        // register A is `register_floating_anchor` itself — which is called
+        // exclusively from the compositor's map-hook on NEW window mapping.
+        // Since A is already mapped, the map-hook doesn't fire for A. We
+        // simulate "C arrives, gets matched against some OTHER rule" by
+        // registering an unrelated dependent D=4 against C=3. That exercises
+        // the anchor index without going through any code path that could
+        // re-bind A.
+        layout.register_floating_anchor(4, 3);
+        assert_eq!(layout.floating_anchor_target_of(&4), Some(&3));
+        // The unrelated registration must NOT have side-effected A's state.
+        assert_eq!(
+            layout.floating_anchor_target_of(&1),
+            None,
+            "orphaned dependent must NOT be re-anchored as a side effect of \
+             unrelated anchor activity",
+        );
+
+        // Positive control: register_floating_anchor IS able to re-bind A
+        // to a new target. The previous assertion is only meaningful because
+        // the API can do this on demand — it just doesn't fire automatically.
+        layout.register_floating_anchor(1, 3);
+        assert_eq!(
+            layout.floating_anchor_target_of(&1),
+            Some(&3),
+            "positive control: explicit register_floating_anchor must rebind",
+        );
+
+        // Re-orphan via the target-close path; A returns to None.
+        layout.orphan_floating_anchor_dependents_of(&3);
+        assert_eq!(layout.floating_anchor_target_of(&1), None);
+        assert_eq!(layout.floating_anchor_target_of(&4), None);
+    }
+
+    #[test]
+    fn rect_cache_distinguishes_workspaces_with_same_local_rect() {
+        // Pins the documented invariant on `floating_anchor_target_rects`'s
+        // (WorkspaceId, Rectangle) key: a target migrating to a different
+        // workspace where its workspace-local rect coordinates happen to
+        // match the cached entry must NOT be silently skipped by the
+        // sweep's compare-and-skip. A rect-only cache would lose this case;
+        // the (ws_id, rect) tuple preserves it.
+        //
+        // We exercise the comparison directly without running the sweep —
+        // the sweep's compare logic is `(ws_a, rect_a) == (ws_b, rect_b)`,
+        // which decomposes into `(ws_a == ws_b) && (rect_a == rect_b)`. If
+        // either component diverges, the cache MISS triggers notify.
+        use smithay::utils::{Logical, Rectangle};
+
+        use crate::layout::workspace::WorkspaceId;
+
+        let ws_a = WorkspaceId::specific(1);
+        let ws_b = WorkspaceId::specific(2);
+        let identical_rect: Rectangle<f64, Logical> =
+            Rectangle::new((16.0, 16.0).into(), (800.0, 600.0).into());
+
+        // The cache entry from before migration.
+        let cached: (WorkspaceId, Rectangle<f64, Logical>) = (ws_a, identical_rect);
+        // The current state after the target moved to ws_b with the same
+        // local coordinates (struts unchanged, same window size).
+        let current: (WorkspaceId, Rectangle<f64, Logical>) = (ws_b, identical_rect);
+
+        // The whole point of the workspace-included key: these compare as
+        // !=, so the sweep's `if cached == Some(current)` short-circuit
+        // does NOT fire, and `notify_tile_changed` runs.
+        assert_ne!(
+            cached, current,
+            "rect-cache comparison must distinguish workspaces even when \
+             workspace-local rect coordinates are identical",
+        );
+        // Sanity: the rect halves on their own DO match — a rect-only
+        // cache would silently miss the migration.
+        assert_eq!(
+            cached.1, current.1,
+            "test premise: the rectangles themselves must compare equal",
+        );
     }
 }

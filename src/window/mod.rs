@@ -237,8 +237,8 @@ impl ResolvedWindowRules {
                     resolved.default_column_display = Some(x);
                 }
 
-                if let Some(x) = rule.default_floating_position {
-                    resolved.default_floating_position = Some(x);
+                if let Some(x) = &rule.default_floating_position {
+                    resolved.default_floating_position = Some(x.clone());
                 }
 
                 if let Some(x) = rule.open_on_output.as_deref() {
@@ -467,4 +467,285 @@ fn window_matches(window: WindowRef, role: &XdgToplevelSurfaceRoleAttributes, m:
     }
 
     true
+}
+
+/// Adapter that evaluates a [`Match`] against a mapped window, mirroring the
+/// shape `ResolvedWindowRules::compute` uses at rule-resolution time. Reuses
+/// [`window_matches`] verbatim rather than duplicating the matcher logic.
+fn mapped_matches(mapped: &Mapped, m: &Match, is_at_startup: bool) -> bool {
+    if let Some(at_startup) = m.at_startup {
+        if at_startup != is_at_startup {
+            return false;
+        }
+    }
+    with_toplevel_role(mapped.toplevel(), |role| {
+        if role.server_pending.is_none() {
+            role.server_pending = Some(role.current_server_state().clone());
+        }
+        window_matches(WindowRef::Mapped(mapped), role, m)
+    })
+}
+
+/// Glue that bridges niri's `Layout<Mapped>` state to the pure [`resolve_target`]
+/// helper. Walks all mapped windows, filters by `target` via [`mapped_matches`],
+/// excludes the dependent window itself, and projects each survivor into a
+/// [`TargetCandidate`]. The result feeds [`resolve_target`] which applies the
+/// layered filter (same-workspace → same-output → MRU).
+///
+/// Returns `Option<Window>` — the smithay `Window` is `<Mapped as
+/// LayoutElement>::Id`, which is what `Layout::register_floating_anchor` and
+/// the rest of the layout-level anchor API are keyed on.
+///
+/// This is the only entry point a caller (e.g. dialog-map handler) needs:
+/// `Some(target_id)` to anchor, `None` to fall back to working-area positioning.
+pub fn resolve_position_frame_target(
+    layout: &crate::layout::Layout<Mapped>,
+    target: &Match,
+    dependent_id: &smithay::desktop::Window,
+    dependent_workspace_id: crate::layout::workspace::WorkspaceId,
+    dependent_output_name: Option<&str>,
+    is_at_startup: bool,
+) -> Option<smithay::desktop::Window> {
+    let candidates = layout.workspaces().flat_map(|(monitor, _, workspace)| {
+        let workspace_id = workspace.id();
+        let output_name = monitor.map(|m| m.output_name().clone());
+        workspace.windows().filter_map(move |mapped| {
+            // Use the LayoutElement::Id (the smithay Window) for both the
+            // dependent-skip check and the resulting TargetCandidate so the
+            // key type matches the anchor index.
+            let window_id = <Mapped as crate::layout::LayoutElement>::id(mapped).clone();
+            if &window_id == dependent_id {
+                return None;
+            }
+            if !mapped_matches(mapped, target, is_at_startup) {
+                return None;
+            }
+            Some(TargetCandidate {
+                id: window_id,
+                workspace_id,
+                output_name: output_name.clone(),
+                focus_timestamp: mapped.get_focus_timestamp(),
+            })
+        })
+    });
+    resolve_target(candidates, dependent_workspace_id, dependent_output_name)
+}
+
+/// A minimal projection of a mapped window's state for the cross-window
+/// positioning target resolver. Constructed by [`resolve_position_frame_target`]
+/// when iterating mapped windows; consumed by [`resolve_target`].
+///
+/// Generic on the id type so the pure resolver is testable with simple values
+/// (e.g. `u32`) while production `Layout<Mapped>` carries `Window` (smithay's
+/// `LayoutElement::Id` for `Mapped`).
+///
+/// Owning `output_name` (rather than borrowing) keeps the resolver decoupled
+/// from `Layout`'s lifetimes — the resolver is a pure function that can be
+/// tested without any layout fixture.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TargetCandidate<Id> {
+    pub id: Id,
+    pub workspace_id: crate::layout::workspace::WorkspaceId,
+    /// `None` for the `NoOutputs` monitor-set case (workspaces with no
+    /// associated output).
+    pub output_name: Option<String>,
+    /// `None` if the window has never been focused. Resolved by [`resolve_target`]
+    /// as strictly less recent than any `Some(_)`.
+    pub focus_timestamp: Option<std::time::Duration>,
+}
+
+/// Pick a target window from a set of `Match`-matched candidates, applying the
+/// epic's layered filter: same-workspace beats same-output beats anywhere, and
+/// within each layer the most-recently-focused candidate wins. Returns the
+/// chosen window's `MappedId` or `None` if `candidates` was empty.
+///
+/// The caller is responsible for filtering out the *dependent* window itself
+/// before calling — this function will happily return the dependent's own id
+/// if it's present.
+///
+/// Ordering of ties: when multiple candidates compare equal under the MRU
+/// rule (including the "all `None` timestamps" case), iteration order wins
+/// (first-seen is kept).
+pub fn resolve_target<Id, I>(
+    candidates: I,
+    dependent_workspace_id: crate::layout::workspace::WorkspaceId,
+    dependent_output_name: Option<&str>,
+) -> Option<Id>
+where
+    Id: Clone,
+    I: IntoIterator<Item = TargetCandidate<Id>>,
+{
+    // Single-pass layered filter: maintain a best-so-far tracker for each
+    // of the three priority layers (same-workspace, same-output, anywhere).
+    // The layer of a candidate's MRU pick is "best wins MRU within the
+    // most-specific layer it satisfies", so a same-workspace candidate
+    // never gets beaten by a same-output candidate even if the latter is
+    // more recently focused. After the walk, return the most-specific
+    // populated layer's pick.
+    let mut best_workspace: Option<TargetCandidate<Id>> = None;
+    let mut best_output: Option<TargetCandidate<Id>> = None;
+    let mut best_any: Option<TargetCandidate<Id>> = None;
+
+    for c in candidates {
+        if c.workspace_id == dependent_workspace_id {
+            update_mru(&mut best_workspace, &c);
+        }
+        if c.output_name.as_deref() == dependent_output_name {
+            update_mru(&mut best_output, &c);
+        }
+        update_mru(&mut best_any, &c);
+    }
+
+    best_workspace.or(best_output).or(best_any).map(|c| c.id)
+}
+
+/// MRU comparison used by [`resolve_target`]. `current` is updated in place
+/// to `candidate` if the candidate beats it under the MRU rule
+/// (`Some(t) > None`, larger timestamp wins, ties keep the existing).
+fn update_mru<Id: Clone>(
+    current: &mut Option<TargetCandidate<Id>>,
+    candidate: &TargetCandidate<Id>,
+) {
+    let beats = match current.as_ref() {
+        None => true,
+        Some(b) => match (candidate.focus_timestamp, b.focus_timestamp) {
+            (Some(ct), Some(bt)) => ct > bt,
+            (Some(_), None) => true,
+            (None, _) => false,
+        },
+    };
+    if beats {
+        *current = Some(candidate.clone());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::time::Duration;
+
+    use super::*;
+    use crate::layout::workspace::WorkspaceId;
+
+    /// Source of unique ids for tests; each `cand` call burns one. The id
+    /// type is just `u32` — the resolver is generic, so the production
+    /// `Window` type isn't needed for testing.
+    static NEXT_TEST_ID: AtomicU32 = AtomicU32::new(1);
+
+    fn cand(ws: u64, output: Option<&str>, ts_micros: Option<u64>) -> TargetCandidate<u32> {
+        TargetCandidate {
+            id: NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed),
+            workspace_id: WorkspaceId::specific(ws),
+            output_name: output.map(str::to_owned),
+            focus_timestamp: ts_micros.map(Duration::from_micros),
+        }
+    }
+
+    #[test]
+    fn resolve_target_no_candidates_returns_none() {
+        let result = resolve_target(
+            Vec::<TargetCandidate<u32>>::new(),
+            WorkspaceId::specific(1),
+            Some("DP-1"),
+        );
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn resolve_target_single_candidate_returns_it_regardless_of_match() {
+        let c = cand(99, Some("DP-99"), Some(10));
+        let id = c.id;
+        let result = resolve_target(vec![c], WorkspaceId::specific(1), Some("DP-1"));
+        assert_eq!(result, Some(id));
+    }
+
+    #[test]
+    fn resolve_target_prefers_same_workspace_over_other_workspace_even_with_older_ts() {
+        // Older timestamp but right workspace.
+        let on_ws = cand(1, Some("DP-1"), Some(1));
+        let on_ws_id = on_ws.id;
+        // Newer timestamp but wrong workspace.
+        let off_ws = cand(2, Some("DP-1"), Some(1000));
+        let result = resolve_target(vec![off_ws, on_ws], WorkspaceId::specific(1), Some("DP-1"));
+        assert_eq!(result, Some(on_ws_id));
+    }
+
+    #[test]
+    fn resolve_target_prefers_same_output_when_no_workspace_match() {
+        // No candidate on workspace 1; we should prefer same output.
+        let on_output = cand(5, Some("DP-1"), Some(1));
+        let on_output_id = on_output.id;
+        let off_output = cand(7, Some("DP-2"), Some(1000));
+        let result = resolve_target(
+            vec![off_output, on_output],
+            WorkspaceId::specific(1),
+            Some("DP-1"),
+        );
+        assert_eq!(result, Some(on_output_id));
+    }
+
+    #[test]
+    fn resolve_target_falls_through_to_all_when_neither_workspace_nor_output_match() {
+        let only = cand(99, Some("DP-99"), Some(42));
+        let only_id = only.id;
+        let result = resolve_target(vec![only], WorkspaceId::specific(1), Some("DP-1"));
+        assert_eq!(result, Some(only_id));
+    }
+
+    #[test]
+    fn resolve_target_picks_mru_within_same_workspace_set() {
+        let older = cand(1, Some("DP-1"), Some(100));
+        let newer = cand(1, Some("DP-1"), Some(200));
+        let newer_id = newer.id;
+        let result = resolve_target(vec![older, newer], WorkspaceId::specific(1), Some("DP-1"));
+        assert_eq!(result, Some(newer_id));
+    }
+
+    #[test]
+    fn resolve_target_some_timestamp_beats_none_timestamp() {
+        let no_ts = cand(1, Some("DP-1"), None);
+        let with_ts = cand(1, Some("DP-1"), Some(1));
+        let with_ts_id = with_ts.id;
+        let result = resolve_target(vec![no_ts, with_ts], WorkspaceId::specific(1), Some("DP-1"));
+        assert_eq!(result, Some(with_ts_id));
+    }
+
+    #[test]
+    fn resolve_target_all_none_timestamps_picks_first_in_iteration_order() {
+        let first = cand(1, Some("DP-1"), None);
+        let first_id = first.id;
+        let second = cand(1, Some("DP-1"), None);
+        let result = resolve_target(vec![first, second], WorkspaceId::specific(1), Some("DP-1"));
+        assert_eq!(result, Some(first_id));
+    }
+
+    #[test]
+    fn resolve_target_short_circuits_to_workspace_ignoring_better_match_elsewhere() {
+        // Workspace match is the WORST candidate everywhere else,
+        // but it's the right workspace so it must win.
+        let bad_on_ws = cand(1, None, None);
+        let bad_on_ws_id = bad_on_ws.id;
+        let good_off_ws = cand(2, Some("DP-1"), Some(9999));
+        let result = resolve_target(
+            vec![good_off_ws, bad_on_ws],
+            WorkspaceId::specific(1),
+            Some("DP-1"),
+        );
+        assert_eq!(result, Some(bad_on_ws_id));
+    }
+
+    #[test]
+    fn resolve_target_handles_no_output_dependent() {
+        // Dependent has no output (NoOutputs case); output filter should match
+        // candidates whose output_name is also None.
+        let on_no_output = cand(7, None, Some(1));
+        let on_no_output_id = on_no_output.id;
+        let off_output = cand(8, Some("DP-1"), Some(1000));
+        let result = resolve_target(
+            vec![off_output, on_no_output],
+            WorkspaceId::specific(1),
+            None,
+        );
+        assert_eq!(result, Some(on_no_output_id));
+    }
 }

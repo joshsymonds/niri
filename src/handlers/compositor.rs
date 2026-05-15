@@ -211,6 +211,27 @@ impl CompositorHandler for State {
                     } else {
                         AddWindowTarget::Auto
                     };
+                    // Capture cross-window anchor data before `mapped` moves into
+                    // add_window. Only relevant for windows opening floating; the
+                    // resolver is a no-op for tiled tiles. The dependent id is
+                    // the smithay `Window` (LayoutElement::Id for Mapped), which
+                    // is also what the anchor index is keyed on.
+                    let anchor_dependent_window = mapped.window.clone();
+                    let anchor_target_match = if is_floating {
+                        mapped
+                            .rules()
+                            .default_floating_position
+                            .as_ref()
+                            .and_then(|p| match p.frame() {
+                                niri_config::PositionFrame::Window { target } => {
+                                    Some(target.clone())
+                                }
+                                niri_config::PositionFrame::WorkingArea => None,
+                            })
+                    } else {
+                        None
+                    };
+
                     let output = self.niri.layout.add_window(
                         mapped,
                         target,
@@ -221,6 +242,46 @@ impl CompositorHandler for State {
                         activate,
                     );
                     let output = output.cloned();
+
+                    // Cross-window positioning: resolve the target (now that
+                    // the dependent is in the layout and we can read its
+                    // workspace/output) and register the relationship.
+                    if let Some(target_match) = anchor_target_match {
+                        if let Some((ws_id, dep_output, _mon_idx, _ws_idx)) = self
+                            .niri
+                            .layout
+                            .find_window_position_by_id(&anchor_dependent_window)
+                        {
+                            let dep_output_name = dep_output.map(|o| o.name().to_string());
+                            let is_at_startup = self.niri.is_at_startup;
+                            if let Some(target_window) =
+                                crate::window::resolve_position_frame_target(
+                                    &self.niri.layout,
+                                    &target_match,
+                                    &anchor_dependent_window,
+                                    ws_id,
+                                    dep_output_name.as_deref(),
+                                    is_at_startup,
+                                )
+                            {
+                                self.niri.layout.register_floating_anchor(
+                                    anchor_dependent_window.clone(),
+                                    target_window,
+                                );
+                                // Move the freshly-mapped dialog from the
+                                // working-area-center fallback to its
+                                // target-rect-relative position.
+                                self.niri
+                                    .layout
+                                    .reposition_floating_anchor_dependent(&anchor_dependent_window);
+                            } else {
+                                debug!(
+                                    "in-window-of matched no candidate window; falling back to \
+                                     working-area positioning",
+                                );
+                            }
+                        }
+                    }
 
                     // The window state cannot contain Fullscreen and Maximized at once. Therefore,
                     // if the window ended up fullscreen, then we only know that it is also
@@ -295,6 +356,9 @@ impl CompositorHandler for State {
                         .stop_casts_for_target(CastTarget::Window { id: id.get() });
 
                     self.niri.window_mru_ui.remove_window(id);
+                    // Cross-window anchor cleanup (drop as dependent, orphan
+                    // as target) is handled inside `Layout::remove_window`
+                    // itself — see comment there.
                     self.niri.layout.remove_window(&window, transaction.clone());
                     self.add_default_dmabuf_pre_commit_hook(surface);
 

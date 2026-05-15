@@ -2024,6 +2024,23 @@ impl<W: LayoutElement> Workspace<W> {
         &self.floating
     }
 
+    /// Re-place a floating tile in this workspace using `target_rect` as the
+    /// reference for its `default_floating_position` rule. Forwards to
+    /// `FloatingSpace::reposition_anchored`. No-op if the id isn't in the
+    /// floating set.
+    ///
+    /// `reposition_anchored` is itself a no-op when `id` isn't in the
+    /// floating set (it returns early on the `tiles.iter().position(...)`
+    /// lookup), so we don't need a separate `has_window` guard — that
+    /// would just walk the tile list a second time.
+    pub fn reposition_floating_anchored(
+        &mut self,
+        id: &W::Id,
+        target_rect: Rectangle<f64, Logical>,
+    ) {
+        self.floating.reposition_anchored(id, target_rect);
+    }
+
     #[cfg(test)]
     pub fn verify_invariants(&self, move_win_id: Option<&W::Id>) {
         use approx::assert_abs_diff_eq;

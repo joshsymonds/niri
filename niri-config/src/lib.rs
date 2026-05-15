@@ -60,7 +60,7 @@ pub use crate::recent_windows::{MruDirection, MruFilter, MruPreviews, MruScope, 
 pub use crate::utils::FloatOrInt;
 use crate::utils::{Flag, MergeWith as _};
 pub use crate::window_rule::{
-    FloatingPosition, PopupsRule, RelativeTo, ResolvedPopupsRules, WindowRule,
+    FloatingPosition, PopupsRule, PositionFrame, RelativeTo, ResolvedPopupsRules, WindowRule,
 };
 pub use crate::workspace::{Workspace, WorkspaceLayoutPart};
 
@@ -631,13 +631,10 @@ impl ConfigPath {
 
 #[cfg(test)]
 mod tests {
-    use std::str::FromStr;
-
     use insta::{assert_debug_snapshot, assert_snapshot};
     use pretty_assertions::assert_eq;
 
     use super::*;
-    use crate::utils::Percent;
 
     #[test]
     fn can_create_default_config() {
@@ -893,9 +890,6 @@ mod tests {
                 default-window-height { fixed 500; }
                 default-column-display "tabbed"
                 default-floating-position x=100 y=-200 relative-to="bottom-left"
-                clip-fullscreen-backdrop-to-window true
-                block-pointer-constraints true
-                render-above-fullscreen true
 
                 focus-ring {
                     off
@@ -1139,7 +1133,6 @@ mod tests {
                 focus_follows_mouse: Some(
                     FocusFollowsMouse {
                         max_scroll_amount: None,
-                        edge_deadzone: None,
                     },
                 ),
                 workspace_auto_back_and_forth: true,
@@ -1422,7 +1415,6 @@ mod tests {
                         },
                     ),
                 },
-                focus_flash: None,
                 preset_column_widths: [
                     Proportion(
                         0.25,
@@ -1457,7 +1449,6 @@ mod tests {
                     ),
                 ],
                 center_focused_column: OnOverflow,
-                cross_monitor_column_insert: AfterActive,
                 always_center_single_column: false,
                 empty_workspace_above_first: false,
                 default_column_display: Tabbed,
@@ -1864,17 +1855,8 @@ mod tests {
                     opacity: None,
                     geometry_corner_radius: None,
                     clip_to_geometry: None,
-                    clip_fullscreen_backdrop_to_window: Some(
-                        true,
-                    ),
                     baba_is_float: None,
                     block_out_from: None,
-                    block_pointer_constraints: Some(
-                        true,
-                    ),
-                    render_above_fullscreen: Some(
-                        true,
-                    ),
                     variable_refresh_rate: None,
                     default_column_display: Some(
                         Tabbed,
@@ -1888,6 +1870,7 @@ mod tests {
                                 -200.0,
                             ),
                             relative_to: BottomLeft,
+                            in_window_of: None,
                         },
                     ),
                     scroll_factor: None,
@@ -2408,7 +2391,31 @@ mod tests {
     }
 
     #[test]
-    fn parse_default_floating_position_center() {
+    fn parse_default_floating_position_no_in_window_of_means_working_area() {
+        let config = do_parse(
+            r##"
+            window-rule {
+                default-floating-position x=10 y=20 relative-to="top-left"
+            }
+            "##,
+        );
+        let pos = config.window_rules[0]
+            .default_floating_position
+            .as_ref()
+            .expect("default-floating-position should have parsed");
+        assert!(pos.in_window_of.is_none(), "default frame is WorkingArea");
+        assert!(matches!(pos.frame(), PositionFrame::WorkingArea));
+    }
+
+    #[test]
+    fn parse_relative_to_center() {
+        // Pins `relative-to="center"` to the `RelativeTo::Center` variant
+        // at the parser layer. The Center variant participates in
+        // `compute_anchor_position`'s math (both x and y center) and is
+        // exercised end-to-end by the
+        // `dialog_opens_centered_on_target_via_relative_to_center`
+        // integration test; this test catches `knuffel::DecodeScalar`
+        // regressions that would silently fail to parse the variant.
         let config = do_parse(
             r##"
             window-rule {
@@ -2418,14 +2425,18 @@ mod tests {
         );
         let pos = config.window_rules[0]
             .default_floating_position
+            .as_ref()
             .expect("default-floating-position should have parsed");
-        assert_eq!(pos.x.0, 0.0);
-        assert_eq!(pos.y.0, 0.0);
         assert_eq!(pos.relative_to, RelativeTo::Center);
     }
 
     #[test]
     fn parse_default_floating_position_center_with_offset() {
+        // Center with a non-zero (x, y) offset. The Center variant adds
+        // the working-area's mid-axis offset to (x, y), so the final
+        // position is `area_center + (x, y) - tile/2`. Non-zero offsets
+        // exercise that branch which `parse_relative_to_center` (x=0, y=0)
+        // doesn't.
         let config = do_parse(
             r##"
             window-rule {
@@ -2435,10 +2446,144 @@ mod tests {
         );
         let pos = config.window_rules[0]
             .default_floating_position
+            .as_ref()
             .expect("default-floating-position should have parsed");
         assert_eq!(pos.x.0, 100.0);
         assert_eq!(pos.y.0, -50.0);
         assert_eq!(pos.relative_to, RelativeTo::Center);
+    }
+
+    #[test]
+    fn parse_in_window_of_with_app_id() {
+        let config = do_parse(
+            r##"
+            window-rule {
+                default-floating-position x=0 y=0 relative-to="top" {
+                    in-window-of app-id="^Zoom$"
+                }
+            }
+            "##,
+        );
+        let pos = config.window_rules[0]
+            .default_floating_position
+            .as_ref()
+            .expect("default-floating-position should have parsed");
+        let target = pos
+            .in_window_of
+            .as_ref()
+            .expect("in-window-of should have parsed");
+        assert_eq!(target.app_id.as_ref().map(|r| r.0.as_str()), Some("^Zoom$"));
+        assert!(target.title.is_none());
+        match pos.frame() {
+            PositionFrame::Window { target: t } => {
+                assert_eq!(t.app_id.as_ref().map(|r| r.0.as_str()), Some("^Zoom$"));
+            }
+            PositionFrame::WorkingArea => panic!("expected Window frame"),
+        }
+    }
+
+    #[test]
+    fn parse_in_window_of_with_app_id_and_title() {
+        let config = do_parse(
+            r##"
+            window-rule {
+                default-floating-position x=0 y=0 relative-to="top" {
+                    in-window-of app-id="^Zoom$" title="^Meeting$"
+                }
+            }
+            "##,
+        );
+        let target = config.window_rules[0]
+            .default_floating_position
+            .as_ref()
+            .and_then(|p| p.in_window_of.as_ref())
+            .expect("in-window-of should have parsed");
+        assert_eq!(target.app_id.as_ref().map(|r| r.0.as_str()), Some("^Zoom$"));
+        assert_eq!(
+            target.title.as_ref().map(|r| r.0.as_str()),
+            Some("^Meeting$")
+        );
+    }
+
+    #[test]
+    fn parse_in_window_of_with_state_field() {
+        let config = do_parse(
+            r##"
+            window-rule {
+                default-floating-position x=10 y=10 relative-to="top" {
+                    in-window-of app-id="^Zoom$" is-floating=true
+                }
+            }
+            "##,
+        );
+        let target = config.window_rules[0]
+            .default_floating_position
+            .as_ref()
+            .and_then(|p| p.in_window_of.as_ref())
+            .expect("in-window-of should have parsed");
+        assert_eq!(target.is_floating, Some(true));
+    }
+
+    #[test]
+    fn parse_in_window_of_with_is_focused() {
+        let config = do_parse(
+            r##"
+            window-rule {
+                default-floating-position x=0 y=0 relative-to="top" {
+                    in-window-of app-id="^Zoom$" is-focused=true
+                }
+            }
+            "##,
+        );
+        let target = config.window_rules[0]
+            .default_floating_position
+            .as_ref()
+            .and_then(|p| p.in_window_of.as_ref())
+            .expect("in-window-of should have parsed");
+        assert_eq!(target.is_focused, Some(true));
+        assert_eq!(target.app_id.as_ref().map(|r| r.0.as_str()), Some("^Zoom$"));
+    }
+
+    #[test]
+    fn parse_in_window_of_with_is_active() {
+        let config = do_parse(
+            r##"
+            window-rule {
+                default-floating-position x=0 y=0 relative-to="top" {
+                    in-window-of is-active=false is-active-in-column=true
+                }
+            }
+            "##,
+        );
+        let target = config.window_rules[0]
+            .default_floating_position
+            .as_ref()
+            .and_then(|p| p.in_window_of.as_ref())
+            .expect("in-window-of should have parsed");
+        assert_eq!(target.is_active, Some(false));
+        assert_eq!(target.is_active_in_column, Some(true));
+    }
+
+    #[test]
+    fn parse_in_window_of_with_at_startup() {
+        let config = do_parse(
+            r##"
+            window-rule {
+                default-floating-position x=0 y=0 relative-to="top" {
+                    in-window-of title="^Slack$" at-startup=true is-urgent=true is-window-cast-target=false
+                }
+            }
+            "##,
+        );
+        let target = config.window_rules[0]
+            .default_floating_position
+            .as_ref()
+            .and_then(|p| p.in_window_of.as_ref())
+            .expect("in-window-of should have parsed");
+        assert_eq!(target.at_startup, Some(true));
+        assert_eq!(target.is_urgent, Some(true));
+        assert_eq!(target.is_window_cast_target, Some(false));
+        assert_eq!(target.title.as_ref().map(|r| r.0.as_str()), Some("^Slack$"));
     }
 
     fn diff_lines(expected: &str, actual: &str) -> String {
@@ -2518,196 +2663,5 @@ mod tests {
         +                0.66667,
         "#,
         );
-    }
-
-    #[test]
-    fn parse_focus_flash_minimal() {
-        let parsed = do_parse(
-            r##"
-            layout {
-                focus-flash {
-                    flash-color "#ffe680"
-                }
-            }
-            "##,
-        );
-        let flash = parsed
-            .layout
-            .focus_flash
-            .expect("focus_flash should be Some");
-        assert_eq!(flash.flash_color, Color::from_str("#ffe680").unwrap());
-        assert_eq!(flash.pulse_duration_ms, 200);
-        assert_eq!(flash.pulses, Pulses(1));
-        assert_eq!(flash.edge_width, 4);
-        assert_eq!(
-            flash.sides,
-            FocusFlashSides {
-                top: true,
-                bottom: true,
-                left: true,
-                right: true,
-            }
-        );
-    }
-
-    #[test]
-    fn parse_focus_flash_full() {
-        let parsed = do_parse(
-            r##"
-            layout {
-                focus-flash {
-                    flash-color "#ffe680"
-                    pulse-duration-ms 350
-                    pulses 3
-                    edge-width 8
-                    sides "left" "right"
-                }
-            }
-            "##,
-        );
-        let flash = parsed
-            .layout
-            .focus_flash
-            .expect("focus_flash should be Some");
-        assert_eq!(flash.pulse_duration_ms, 350);
-        assert_eq!(flash.pulses, Pulses(3));
-        assert_eq!(flash.edge_width, 8);
-        assert_eq!(
-            flash.sides,
-            FocusFlashSides {
-                top: false,
-                bottom: false,
-                left: true,
-                right: true,
-            }
-        );
-    }
-
-    #[test]
-    fn parse_focus_flash_absent() {
-        let parsed = do_parse("");
-        assert_eq!(parsed.layout.focus_flash, None);
-    }
-
-    #[track_caller]
-    fn parse_focus_flash_err(body: &str) -> String {
-        let layout = format!("layout {{\nfocus-flash {{\n{body}\n}}\n}}\n");
-        let err = Config::parse_mem(&layout)
-            .map(|_| ())
-            .expect_err("expected a parse error");
-        format!("{:?}", miette::Report::new(err))
-    }
-
-    #[test]
-    fn parse_focus_flash_pulses_too_high() {
-        let err = parse_focus_flash_err("flash-color \"#ffe680\"\npulses 6");
-        assert!(
-            err.contains("pulses must be between 1 and 5"),
-            "expected range error, got: {err}"
-        );
-    }
-
-    #[test]
-    fn parse_focus_flash_pulses_zero() {
-        let err = parse_focus_flash_err("flash-color \"#ffe680\"\npulses 0");
-        assert!(
-            err.contains("pulses must be between 1 and 5"),
-            "expected range error, got: {err}"
-        );
-    }
-
-    #[test]
-    fn parse_focus_flash_unknown_side() {
-        let err = parse_focus_flash_err("flash-color \"#ffe680\"\nsides \"diagonal\"");
-        assert!(
-            err.contains("unknown side") || err.contains("diagonal"),
-            "expected unknown-side error, got: {err}"
-        );
-    }
-
-    #[test]
-    fn parse_focus_flash_empty_sides() {
-        let err = parse_focus_flash_err("flash-color \"#ffe680\"\nsides");
-        assert!(
-            err.contains("at least one side"),
-            "expected non-empty-sides error, got: {err}"
-        );
-    }
-
-    #[test]
-    fn parse_focus_flash_missing_color() {
-        let err = parse_focus_flash_err("pulses 2");
-        assert!(
-            err.contains("flash-color") || err.contains("flash_color"),
-            "expected missing flash-color error, got: {err}"
-        );
-    }
-
-    #[test]
-    fn focus_follows_mouse_edge_deadzone_alone() {
-        let parsed = do_parse(
-            r##"
-            input {
-                focus-follows-mouse edge-deadzone=20
-            }
-            "##,
-        );
-        let ffm = parsed.input.focus_follows_mouse.unwrap();
-        assert_eq!(ffm.edge_deadzone, Some(20));
-        assert_eq!(ffm.max_scroll_amount, None);
-    }
-
-    #[test]
-    fn focus_follows_mouse_edge_deadzone_absent() {
-        let parsed = do_parse(
-            r##"
-            input {
-                focus-follows-mouse
-            }
-            "##,
-        );
-        let ffm = parsed.input.focus_follows_mouse.unwrap();
-        assert_eq!(ffm.edge_deadzone, None);
-    }
-
-    #[test]
-    fn focus_follows_mouse_edge_deadzone_with_max_scroll_amount() {
-        let parsed = do_parse(
-            r##"
-            input {
-                focus-follows-mouse max-scroll-amount="0%" edge-deadzone=20
-            }
-            "##,
-        );
-        let ffm = parsed.input.focus_follows_mouse.unwrap();
-        assert_eq!(ffm.edge_deadzone, Some(20));
-        assert_eq!(ffm.max_scroll_amount, Some(Percent(0.0)));
-    }
-
-    #[test]
-    fn focus_follows_mouse_property_order_independent() {
-        let parsed = do_parse(
-            r##"
-            input {
-                focus-follows-mouse edge-deadzone=20 max-scroll-amount="0%"
-            }
-            "##,
-        );
-        let ffm = parsed.input.focus_follows_mouse.unwrap();
-        assert_eq!(ffm.edge_deadzone, Some(20));
-        assert_eq!(ffm.max_scroll_amount, Some(Percent(0.0)));
-    }
-
-    #[test]
-    fn focus_follows_mouse_edge_deadzone_zero() {
-        let parsed = do_parse(
-            r##"
-            input {
-                focus-follows-mouse edge-deadzone=0
-            }
-            "##,
-        );
-        let ffm = parsed.input.focus_follows_mouse.unwrap();
-        assert_eq!(ffm.edge_deadzone, Some(0));
     }
 }

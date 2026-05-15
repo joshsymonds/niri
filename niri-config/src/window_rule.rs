@@ -145,7 +145,7 @@ pub struct Match {
     pub at_startup: Option<bool>,
 }
 
-#[derive(knuffel::Decode, Debug, Clone, Copy, PartialEq)]
+#[derive(knuffel::Decode, Debug, Clone, PartialEq)]
 pub struct FloatingPosition {
     #[knuffel(property)]
     pub x: FloatOrInt<-65535, 65535>,
@@ -153,6 +153,41 @@ pub struct FloatingPosition {
     pub y: FloatOrInt<-65535, 65535>,
     #[knuffel(property, default)]
     pub relative_to: RelativeTo,
+    /// Optional target window to anchor inside. When `Some`, positioning uses
+    /// the target's tile rectangle as the reference frame instead of the
+    /// workspace working area. KDL surface: an `in-window-of` child block whose
+    /// shape mirrors a `match` block.
+    #[knuffel(child)]
+    pub in_window_of: Option<Match>,
+}
+
+/// Which reference rectangle a `FloatingPosition` anchors inside.
+///
+/// `WorkingArea` is the historical default and applies whenever
+/// `FloatingPosition::in_window_of` is `None`. `Window` is the cross-window
+/// anchoring mode introduced alongside this enum; the target window is
+/// identified by the contained `Match` and is resolved at placement time.
+///
+/// Borrowed (not owned) so the enum is `Copy` and ergonomic at call sites that
+/// only need to read the target; produce one via
+/// `FloatingPosition::frame()` rather than constructing directly.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PositionFrame<'a> {
+    WorkingArea,
+    Window { target: &'a Match },
+}
+
+impl FloatingPosition {
+    /// Returns the conceptual reference frame this position anchors inside.
+    /// `None` for `in_window_of` collapses to `WorkingArea`; `Some(target)`
+    /// surfaces as `Window { target }`. Layout code is expected to match on
+    /// the result rather than reading `in_window_of` directly.
+    pub fn frame(&self) -> PositionFrame<'_> {
+        match &self.in_window_of {
+            None => PositionFrame::WorkingArea,
+            Some(target) => PositionFrame::Window { target },
+        }
+    }
 }
 
 #[derive(knuffel::DecodeScalar, Debug, Default, Clone, Copy, PartialEq, Eq)]
