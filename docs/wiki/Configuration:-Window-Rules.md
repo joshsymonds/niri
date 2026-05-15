@@ -620,6 +620,32 @@ window-rule {
 > This is unrelated to keyboard focus or pointer focus.
 > Cursor entry into the window's surface still updates pointer focus normally (and triggers [`focus-follows-mouse`](./Configuration:-Input.md#focus-follows-mouse) if configured) — only the pointer-lock/confine activation is gated.
 
+#### `render-above-fullscreen`
+
+<sup>Since: next</sup>
+
+Promote a floating window's render order so it appears above any fullscreen window on the same workspace.
+By default, fullscreen windows cover floating windows and the top layer-shell layer (see [Fullscreen and Maximize](./Fullscreen-and-Maximize.md)).
+With this rule set, a flagged floating window renders **after** the scrolling layout, visually appearing above any fullscreen tile.
+
+Only affects floating windows — the rule is a no-op for tiled windows.
+Does not affect layer-shell stacking; overlay-layer surfaces (notification daemons, launchers) remain above all toplevels regardless of this flag.
+
+Useful for "always visible" utility windows that ride alongside other apps — annotation toolbars, screen-share controls, picture-in-picture video tiles — which should stay reachable even when the user fullscreens an unrelated app.
+
+```kdl
+window-rule {
+    match app-id="some-app"
+    render-above-fullscreen true
+}
+```
+
+> [!NOTE]
+> Closing-animation windows always render below fullscreen, regardless of whether they had this flag set.
+> The rule only affects fully-mapped floating tiles.
+
+See also: [Floating Windows](./Floating-Windows.md), [Fullscreen and Maximize](./Fullscreen-and-Maximize.md).
+
 #### `opacity`
 
 Set the opacity of the window.

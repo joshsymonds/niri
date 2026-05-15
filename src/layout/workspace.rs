@@ -17,7 +17,7 @@ use smithay::utils::{Logical, Point, Rectangle, Serial, Size, Transform};
 use smithay::wayland::compositor::with_states;
 use smithay::wayland::shell::xdg::SurfaceCachedState;
 
-use super::floating::{FloatingSpace, FloatingSpaceRenderElement};
+use super::floating::{FloatingRenderPass, FloatingSpace, FloatingSpaceRenderElement};
 use super::scrolling::{
     Column, ColumnWidth, ScrollDirection, ScrollingSpace, ScrollingSpaceRenderElement,
 };
@@ -1660,18 +1660,32 @@ impl<W: LayoutElement> Workspace<W> {
         ctx: RenderCtx<R>,
         xray_pos: XrayPos,
         focus_ring: bool,
+        pass: FloatingRenderPass,
         push: &mut dyn FnMut(WorkspaceRenderElement<R>),
     ) {
-        if !self.is_floating_visible() {
+        // The AboveFullscreen pass MUST render even when fullscreen is
+        // focused — that's the whole point of the render-above-fullscreen
+        // window rule. niri's "fullscreen hides floating" mechanic is
+        // implemented as this conditional early-return (not as z-order),
+        // so we bypass it for flagged tiles.
+        //
+        // The BelowFullscreen pass keeps the existing visibility behavior:
+        // when fullscreen is focused, non-flagged floating tiles are
+        // hidden entirely (not rendered, not just behind).
+        if pass == FloatingRenderPass::BelowFullscreen && !self.is_floating_visible() {
             return;
         }
 
         let view_rect = Rectangle::from_size(self.view_size);
         let floating_focus_ring = focus_ring && self.floating_is_active();
-        self.floating
-            .render(ctx, xray_pos, view_rect, floating_focus_ring, &mut |elem| {
-                push(elem.into())
-            });
+        self.floating.render(
+            ctx,
+            xray_pos,
+            view_rect,
+            floating_focus_ring,
+            pass,
+            &mut |elem| push(elem.into()),
+        );
     }
 
     pub fn render_shadow<R: NiriRenderer>(
@@ -1770,15 +1784,22 @@ impl<W: LayoutElement> Workspace<W> {
     }
 
     pub fn window_under(&self, pos: Point<f64, Logical>) -> Option<(&W, HitType)> {
-        // This logic is consistent with tiles_with_render_positions().
-        if self.is_floating_visible() {
-            if let Some(rv) = self
-                .floating
-                .tiles_with_render_positions()
-                .find_map(|(tile, tile_pos)| HitType::hit_tile(tile, tile_pos, pos))
-            {
-                return Some(rv);
-            }
+        // Hit-test floating tiles in a way that matches what's actually
+        // rendered. When the floating layer is generally hidden
+        // (fullscreen focused), tiles with `render-above-fullscreen` set
+        // still render via the AboveFullscreen pass — so they must still
+        // receive pointer input. Otherwise users see a visible toolbar
+        // but clicks fall through to the fullscreen surface behind it.
+        let test_all_floating = self.is_floating_visible();
+        if let Some(rv) = self
+            .floating
+            .tiles_with_render_positions()
+            .filter(|(tile, _)| {
+                test_all_floating || tile.window().rules().render_above_fullscreen == Some(true)
+            })
+            .find_map(|(tile, tile_pos)| HitType::hit_tile(tile, tile_pos, pos))
+        {
+            return Some(rv);
         }
 
         self.scrolling.window_under(pos)

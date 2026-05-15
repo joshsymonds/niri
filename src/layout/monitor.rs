@@ -11,6 +11,7 @@ use smithay::backend::renderer::element::Kind;
 use smithay::output::Output;
 use smithay::utils::{Logical, Point, Rectangle, Size};
 
+use super::floating::FloatingRenderPass;
 use super::insert_hint_element::{InsertHintElement, InsertHintRenderElement};
 use super::scrolling::{Column, ColumnWidth};
 use super::tile::Tile;
@@ -1927,7 +1928,32 @@ impl<W: LayoutElement> Monitor<W> {
 
             let xray_pos = XrayPos::new(geo.loc, zoom);
 
-            ws.render_floating(ctx.r(), xray_pos, focus_ring, push!());
+            // Two-pass floating render. The renderer paints first-emitted
+            // at the TOP of the on-screen z-stack (front-to-back order, per
+            // smithay's OutputDamageTracker), so flagged tiles must emit
+            // FIRST to land visually above scrolling content — including
+            // fullscreen windows, which live in the scrolling layout.
+            //
+            // Emission order is therefore the inverse of the on-screen
+            // z-position: AboveFullscreen → BelowFullscreen → insert hint
+            // → scrolling. On screen (top → bottom): flagged floating
+            // (AboveFullscreen) → non-flagged floating (BelowFullscreen)
+            // → insert hint → scrolling.
+            ws.render_floating(
+                ctx.r(),
+                xray_pos,
+                focus_ring,
+                FloatingRenderPass::AboveFullscreen,
+                push!(),
+            );
+
+            ws.render_floating(
+                ctx.r(),
+                xray_pos,
+                focus_ring,
+                FloatingRenderPass::BelowFullscreen,
+                push!(),
+            );
 
             if let Some(loc) = insert_hint_render_loc {
                 if loc.workspace == InsertWorkspace::Existing(ws.id()) {

@@ -120,6 +120,9 @@ pub struct ResolvedWindowRules {
     /// Whether to block pointer-constraints (locked + confined) for this window.
     pub block_pointer_constraints: Option<bool>,
 
+    /// Whether to render this window above fullscreen windows in the floating layer.
+    pub render_above_fullscreen: Option<bool>,
+
     /// Whether to enable VRR on this window's primary output if it is on-demand.
     pub variable_refresh_rate: Option<bool>,
 
@@ -307,6 +310,9 @@ impl ResolvedWindowRules {
                 }
                 if let Some(x) = rule.block_pointer_constraints {
                     resolved.block_pointer_constraints = Some(x);
+                }
+                if let Some(x) = rule.render_above_fullscreen {
+                    resolved.render_above_fullscreen = Some(x);
                 }
                 if let Some(x) = rule.variable_refresh_rate {
                     resolved.variable_refresh_rate = Some(x);
