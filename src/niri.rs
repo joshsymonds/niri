@@ -6182,7 +6182,11 @@ impl Niri {
         }
     }
 
-    pub fn handle_focus_follows_mouse(&mut self, new_focus: &PointContents) {
+    pub fn handle_focus_follows_mouse(
+        &mut self,
+        pos: Point<f64, Logical>,
+        new_focus: &PointContents,
+    ) {
         let Some(ffm) = self.config.borrow().input.focus_follows_mouse else {
             return;
         };
@@ -6206,7 +6210,21 @@ impl Niri {
         }
 
         if let Some(window) = &new_focus.window {
-            if !self.layout.is_overview_open() && current_focus.window.as_ref() != Some(window) {
+            // Compare against the layout's keyboard-focused window, not the
+            // cursor's previous geometric window (`current_focus.window`).
+            // With edge-deadzone, those two diverge: the deadzone can suppress
+            // activation on the boundary-crossing motion, leaving keyboard
+            // focus on the old window even as `contents_under(pointer.
+            // current_location())` already reports the new one. A geometric
+            // same-check would then skip the deadzone re-evaluation on every
+            // subsequent motion and FFM would never fire for that window.
+            let already_focused = self
+                .layout
+                .active_workspace()
+                .and_then(|ws| ws.active_window())
+                .map(|m| &m.window)
+                == Some(&window.0);
+            if !self.layout.is_overview_open() && !already_focused {
                 let (window, hit) = window;
 
                 // Don't trigger focus-follows-mouse over the tab indicator.
@@ -6226,6 +6244,39 @@ impl Niri {
                 if let Some(threshold) = ffm.max_scroll_amount {
                     if self.layout.scroll_amount_to_activate(window) > threshold.0 {
                         return;
+                    }
+                }
+
+                if let Some(deadzone) = ffm.edge_deadzone {
+                    match hit {
+                        HitType::Activate { .. } => {
+                            // Pointer is on the tile activation region outside
+                            // the window's input region (the niri border) — the
+                            // cursor has not committed into the window.
+                            return;
+                        }
+                        HitType::Input { win_pos } => {
+                            let Some(output) = new_focus.output.as_ref() else {
+                                return;
+                            };
+                            let Some(output_geo) = self.global_space.output_geometry(output) else {
+                                return;
+                            };
+                            // `pos` is the pointer position that produced
+                            // `new_focus` (passed from the caller before
+                            // pointer.motion runs). `pointer.current_location()`
+                            // here would be the OLD position and would mix
+                            // coord systems with `win_pos` for the new window.
+                            if pointer_in_deadzone(
+                                pos,
+                                output_geo.loc.to_f64(),
+                                *win_pos,
+                                window.geometry().size.to_f64(),
+                                deadzone,
+                            ) {
+                                return;
+                            }
+                        }
                     }
                 }
 
@@ -6490,6 +6541,28 @@ impl ClientData for ClientState {
     fn disconnected(&self, _client_id: ClientId, _reason: DisconnectReason) {}
 }
 
+/// Returns true iff the pointer is within `deadzone` pixels of any edge of a
+/// rectangle of `window_size` whose origin is at `output_loc + win_pos` in
+/// pointer-global space. Performs the full coord transform internally:
+/// `pos_within_window = pointer_global - output_loc - win_pos`, then checks
+/// each edge. Boundary semantic: pointer at exactly `deadzone` from an edge
+/// is NOT in the deadzone — `[0, deadzone)` from each edge is the suppressed
+/// region. Doing the transform here (rather than passing pre-transformed
+/// coords) keeps the inputs in the same coordinate basis the caller has from
+/// `PointContents`, so a stale-pointer or wrong-output bug surfaces in this
+/// function's unit tests rather than silently corrupting the handler.
+fn pointer_in_deadzone(
+    pointer_global: Point<f64, Logical>,
+    output_loc: Point<f64, Logical>,
+    win_pos: Point<f64, Logical>,
+    window_size: Size<f64, Logical>,
+    deadzone: u16,
+) -> bool {
+    let pos = pointer_global - output_loc - win_pos;
+    let d = f64::from(deadzone);
+    pos.x < d || pos.y < d || pos.x > window_size.w - d || pos.y > window_size.h - d
+}
+
 fn scale_relocate_crop<E: Element>(
     elem: E,
     output_scale: Scale<f64>,
@@ -6536,5 +6609,146 @@ niri_render_elements! {
         Texture = PrimaryGpuTextureRenderElement,
         // Used for the CPU-rendered panels.
         RelocatedMemoryBuffer = RelocateRenderElement<MemoryRenderBufferRenderElement<R>>,
+    }
+}
+
+#[cfg(test)]
+mod ffm_deadzone_tests {
+    use smithay::utils::{Logical, Point, Size};
+
+    use super::pointer_in_deadzone;
+
+    fn size_500x400() -> Size<f64, Logical> {
+        Size::from((500., 400.))
+    }
+
+    fn zero() -> Point<f64, Logical> {
+        Point::from((0., 0.))
+    }
+
+    #[test]
+    fn center_not_in_deadzone() {
+        assert!(!pointer_in_deadzone(
+            Point::from((250., 200.)),
+            zero(),
+            zero(),
+            size_500x400(),
+            20,
+        ));
+    }
+
+    #[test]
+    fn near_left_edge_in_deadzone() {
+        assert!(pointer_in_deadzone(
+            Point::from((19., 200.)),
+            zero(),
+            zero(),
+            size_500x400(),
+            20,
+        ));
+    }
+
+    #[test]
+    fn near_right_edge_in_deadzone() {
+        assert!(pointer_in_deadzone(
+            Point::from((481., 200.)),
+            zero(),
+            zero(),
+            size_500x400(),
+            20,
+        ));
+    }
+
+    #[test]
+    fn near_top_edge_in_deadzone() {
+        assert!(pointer_in_deadzone(
+            Point::from((250., 19.)),
+            zero(),
+            zero(),
+            size_500x400(),
+            20,
+        ));
+    }
+
+    #[test]
+    fn near_bottom_edge_in_deadzone() {
+        assert!(pointer_in_deadzone(
+            Point::from((250., 381.)),
+            zero(),
+            zero(),
+            size_500x400(),
+            20,
+        ));
+    }
+
+    #[test]
+    fn exactly_at_left_threshold_not_in_deadzone() {
+        assert!(!pointer_in_deadzone(
+            Point::from((20., 200.)),
+            zero(),
+            zero(),
+            size_500x400(),
+            20,
+        ));
+    }
+
+    #[test]
+    fn just_outside_left_edge_not_in_deadzone() {
+        assert!(!pointer_in_deadzone(
+            Point::from((21., 200.)),
+            zero(),
+            zero(),
+            size_500x400(),
+            20,
+        ));
+    }
+
+    #[test]
+    fn tiny_window_interior_in_deadzone() {
+        // 30x30 window, deadzone=20 → no usable interior; any interior point is
+        // within 20 of some edge.
+        assert!(pointer_in_deadzone(
+            Point::from((15., 15.)),
+            zero(),
+            zero(),
+            Size::from((30., 30.)),
+            20,
+        ));
+    }
+
+    #[test]
+    fn zero_deadzone_never_in_deadzone() {
+        // deadzone=0 → suppressed range is empty per half-open semantic.
+        assert!(!pointer_in_deadzone(
+            Point::from((0.5, 0.5)),
+            zero(),
+            zero(),
+            size_500x400(),
+            0,
+        ));
+    }
+
+    #[test]
+    fn cross_window_pointer_well_inside_candidate() {
+        // Regression test for the stale-pointer bug: an earlier version of the
+        // handler subtracted output_loc + win_pos from the OLD pointer position
+        // (before pointer.motion was applied), yielding negative coordinates
+        // that tripped the deadzone check on every cross-window hover.
+        //
+        // Setup: candidate window at output-local (1500, 0), size 500x400.
+        // Output at global (1920, 0). Pointer at global (3700, 200) lands at
+        // output-local (1780, 200) and window-local (280, 200) — the center of
+        // the 500x400 window. With deadzone=30 this should NOT suppress focus.
+        //
+        // If the helper accidentally drops one of the offsets, the transform
+        // yields out-of-window coords that trip the deadzone, and this assert
+        // fails — that's the bug class we're guarding against.
+        assert!(!pointer_in_deadzone(
+            Point::from((3700., 200.)),
+            Point::from((1920., 0.)),
+            Point::from((1500., 0.)),
+            size_500x400(),
+            30,
+        ));
     }
 }
