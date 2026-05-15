@@ -10,17 +10,17 @@
 //! short-circuited. We use that as the observable signal — no need to
 //! peek at the cursor's actual screen coordinates.
 
-use client::ClientId;
 use niri_config::Config;
-use wayland_client::protocol::wl_surface::WlSurface;
 
 use super::*;
 use crate::niri::CenterCoords;
 
 /// Map a single 100×100 window with the given title and wait for it to
-/// become the active focused tile. Returns the fixture, client id, and
-/// surface so the test can introspect further.
-fn map_titled_window(config: Config, title: &str) -> (Fixture, ClientId, WlSurface) {
+/// become the active focused tile. Returns the fixture so the test can
+/// call into `f.niri_state()` for the move-cursor-to-focused-tile
+/// assertion; the client/surface handles are internal scaffolding the
+/// tests don't need.
+fn map_titled_window(config: Config, title: &str) -> Fixture {
     let mut f = Fixture::with_config(config);
     f.add_output(1, (1920, 1080));
 
@@ -37,7 +37,7 @@ fn map_titled_window(config: Config, title: &str) -> (Fixture, ClientId, WlSurfa
     window.ack_last_and_commit();
     f.double_roundtrip(id);
 
-    (f, id, surface)
+    f
 }
 
 #[test]
@@ -55,7 +55,7 @@ fn gate_fires_for_matched_window() {
         "##,
     )
     .unwrap();
-    let (mut f, _id, _surface) = map_titled_window(config, "toolbar");
+    let mut f = map_titled_window(config, "toolbar");
 
     let warped = f
         .niri_state()
@@ -74,7 +74,7 @@ fn gate_does_not_fire_when_rule_absent() {
     // This is the regression guard: a future refactor that mis-resolves
     // the rule's default would otherwise silently break cursor-follows-
     // focus for every unrelated window.
-    let (mut f, _id, _surface) = map_titled_window(Config::default(), "ordinary");
+    let mut f = map_titled_window(Config::default(), "ordinary");
 
     let warped = f
         .niri_state()
@@ -97,7 +97,7 @@ fn gate_does_not_fire_when_rule_set_to_false() {
         "##,
     )
     .unwrap();
-    let (mut f, _id, _surface) = map_titled_window(config, "ordinary");
+    let mut f = map_titled_window(config, "ordinary");
 
     let warped = f
         .niri_state()
@@ -105,5 +105,39 @@ fn gate_does_not_fire_when_rule_set_to_false() {
     assert!(
         warped,
         "expected the warp to proceed when the rule explicitly sets false",
+    );
+}
+
+#[test]
+fn gate_does_not_fire_when_rule_does_not_match() {
+    // A non-matching rule sets `block-focus-cursor-warp true` for a
+    // different title pattern. The mapped window has title "toolbar"
+    // which does NOT match `^other$`, so the resolution loop in
+    // `ResolvedWindowRules::compute` skips the rule entirely. The gate
+    // must not fire.
+    //
+    // This catches a regression where the `block_focus_cursor_warp`
+    // merge is moved outside the `if !(rule.matches.is_empty() || ...)`
+    // gate, which would let any rule's `Some(true)` leak across to
+    // unrelated windows. The "absent rule" test alone doesn't catch
+    // that — its config has no rules at all so the loop body is
+    // unreachable.
+    let config = Config::parse_mem(
+        r##"
+        window-rule {
+            match title="^other$"
+            block-focus-cursor-warp true
+        }
+        "##,
+    )
+    .unwrap();
+    let mut f = map_titled_window(config, "toolbar");
+
+    let warped = f
+        .niri_state()
+        .move_cursor_to_focused_tile(CenterCoords::Separately);
+    assert!(
+        warped,
+        "expected the warp to proceed when the rule matcher doesn't apply to this window",
     );
 }

@@ -121,8 +121,10 @@ pub struct ResolvedWindowRules {
     pub tiled_state: Option<bool>,
 
     /// Suppress niri's cursor-follows-focus warp for this window. When the
-    /// resolved value is `Some(true)`, `Niri::maybe_warp_cursor_to_focus`
-    /// short-circuits before calling `move_cursor_to_focused_tile`.
+    /// resolved value is `Some(true)`, `Niri::move_cursor_to_focused_tile`
+    /// short-circuits before moving the cursor — covering both
+    /// `maybe_warp_cursor_to_focus` and `maybe_warp_cursor_to_focus_centered`
+    /// (and any future warp wrapper) via that single chokepoint.
     pub block_focus_cursor_warp: Option<bool>,
 
     /// Background effect configuration.
