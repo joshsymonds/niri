@@ -5,6 +5,7 @@ mod fixture;
 mod server;
 
 mod animations;
+mod cursor_warp_gate;
 mod floating;
 mod fullscreen;
 mod layer_shell;

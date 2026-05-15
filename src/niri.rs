@@ -935,6 +935,20 @@ impl State {
         };
         let monitor = self.niri.layout.monitor_for_output(output).unwrap();
 
+        // `block-focus-cursor-warp` window-rule: matched windows opt out
+        // of the cursor-follows-focus warp. Motivated by Zoom's
+        // `annotate_toolbar` (a 112×112 floating overlay during screen-
+        // share-with-annotation) repeatedly grabbing focus via
+        // `xdg_activation_v1.activate()`, which routed through this
+        // function and snapped the cursor to the toolbar's center (56,56)
+        // every time the user tried to move the mouse.
+        if monitor
+            .active_window()
+            .is_some_and(|mapped| mapped.rules().block_focus_cursor_warp == Some(true))
+        {
+            return false;
+        }
+
         let mut rv = false;
         let rect = monitor.active_window_visual_rectangle();
 
