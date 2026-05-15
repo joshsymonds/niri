@@ -130,6 +130,24 @@ layout {
 }
 ```
 
+### `cross-monitor-column-insert`
+
+<sup>Since: next-release</sup>
+
+Where a column lands when moved across monitors via the edge-fallthrough binds (e.g. moving past the leftmost column on a non-leftmost monitor) or the explicit `move-column-to-monitor-left` / `move-column-to-monitor-right` actions.
+This can be set to:
+
+- `"after-active"`: the moved column is inserted after the destination's currently active column. This is the default and matches the existing behavior.
+- `"adjacent"`: the moved column lands on the edge of the destination it arrived from — the right edge when moving left, the left edge when moving right.
+
+`move-column-to-monitor-up`, `-down`, `-previous`, `-next`, and the named-monitor variant always use `"after-active"` behavior because they have no inferable horizontal direction.
+
+```kdl
+layout {
+    cross-monitor-column-insert "adjacent"
+}
+```
+
 ### `always-center-single-column`
 
 <sup>Since: 0.1.9</sup>

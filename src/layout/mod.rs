@@ -902,6 +902,7 @@ impl<W: LayoutElement> Layout<W> {
         &mut self,
         monitor_idx: usize,
         workspace_idx: usize,
+        target_col_idx: Option<usize>,
         column: Column<W>,
         activate: bool,
     ) {
@@ -914,7 +915,7 @@ impl<W: LayoutElement> Layout<W> {
             panic!()
         };
 
-        monitors[monitor_idx].add_column(workspace_idx, column, activate);
+        monitors[monitor_idx].add_column(workspace_idx, target_col_idx, column, activate);
 
         if activate {
             *active_monitor_idx = monitor_idx;
@@ -1823,7 +1824,8 @@ impl<W: LayoutElement> Layout<W> {
             }
         }
 
-        self.move_column_to_output(output, None, true);
+        let target_col_idx = self.cross_monitor_target_col(ScrollDirection::Left);
+        self.move_column_to_output(output, None, target_col_idx, true);
         true
     }
 
@@ -1834,8 +1836,25 @@ impl<W: LayoutElement> Layout<W> {
             }
         }
 
-        self.move_column_to_output(output, None, true);
+        let target_col_idx = self.cross_monitor_target_col(ScrollDirection::Right);
+        self.move_column_to_output(output, None, target_col_idx, true);
         true
+    }
+
+    /// Compute the `target_col_idx` for a cross-monitor column move based on
+    /// the configured `cross_monitor_column_insert` option and the direction
+    /// the move is going. Used by edge-fallthrough binds and the explicit
+    /// `MoveColumnToMonitorLeft`/`Right` action handlers.
+    pub(crate) fn cross_monitor_target_col(&self, going: ScrollDirection) -> Option<usize> {
+        match self.options.layout.cross_monitor_column_insert {
+            niri_config::CrossMonitorColumnInsert::AfterActive => None,
+            niri_config::CrossMonitorColumnInsert::Adjacent => match going {
+                // Going left = arriving at the right edge of the dest.
+                ScrollDirection::Left => Some(usize::MAX),
+                // Going right = arriving at the left edge of the dest.
+                ScrollDirection::Right => Some(0),
+            },
+        }
     }
 
     pub fn move_column_to_index(&mut self, index: usize) {
@@ -3382,10 +3401,21 @@ impl<W: LayoutElement> Layout<W> {
         }
     }
 
+    /// Move the active column to another output's workspace.
+    ///
+    /// `target_ws_idx`: workspace index on the destination monitor;
+    /// `None` falls back to the destination's active workspace.
+    ///
+    /// `target_col_idx`: where the column lands within the destination workspace.
+    /// `None` preserves the after-active default. `Some(N)` is clamped to
+    /// `[0, dest_columns.len()]` inside `ScrollingSpace::add_column`, so
+    /// `Some(usize::MAX)` is a legitimate "right edge" sentinel — callers do
+    /// not need to compute the destination's column count themselves.
     pub fn move_column_to_output(
         &mut self,
         output: &Output,
         target_ws_idx: Option<usize>,
+        target_col_idx: Option<usize>,
         activate: bool,
     ) {
         if let MonitorSet::Normal {
@@ -3414,7 +3444,7 @@ impl<W: LayoutElement> Layout<W> {
             let workspace_idx = target_ws_idx
                 .unwrap_or(monitors[new_idx].active_workspace_idx)
                 .min(monitors[new_idx].workspaces.len() - 1);
-            self.add_column_by_idx(new_idx, workspace_idx, column, activate);
+            self.add_column_by_idx(new_idx, workspace_idx, target_col_idx, column, activate);
         }
     }
 

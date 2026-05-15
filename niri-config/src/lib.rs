@@ -1449,6 +1449,7 @@ mod tests {
                     ),
                 ],
                 center_focused_column: OnOverflow,
+                cross_monitor_column_insert: AfterActive,
                 always_center_single_column: false,
                 empty_workspace_above_first: false,
                 default_column_display: Tabbed,

@@ -708,12 +708,13 @@ impl<W: LayoutElement> Workspace<W> {
         }
     }
 
-    pub fn add_column(&mut self, column: Column<W>, activate: bool) {
+    pub fn add_column(&mut self, target_col_idx: Option<usize>, column: Column<W>, activate: bool) {
         for (tile, _) in column.tiles() {
             self.enter_output_for_window(tile.window());
         }
 
-        self.scrolling.add_column(None, column, activate, None);
+        self.scrolling
+            .add_column(target_col_idx, column, activate, None);
 
         if activate {
             self.floating_is_active = FloatingActive::No;

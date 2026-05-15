@@ -3,8 +3,8 @@ use std::cell::{Cell, OnceCell, RefCell};
 use niri_config::utils::{Flag, MergeWith as _};
 use niri_config::workspace::WorkspaceName;
 use niri_config::{
-    CenterFocusedColumn, FloatOrInt, OutputName, Struts, TabIndicatorLength, TabIndicatorPosition,
-    WorkspaceReference,
+    CenterFocusedColumn, CrossMonitorColumnInsert, FloatOrInt, OutputName, Struts,
+    TabIndicatorLength, TabIndicatorPosition, WorkspaceReference,
 };
 use proptest::prelude::*;
 use proptest_derive::Arbitrary;
@@ -570,6 +570,10 @@ enum Op {
         output_id: usize,
         #[proptest(strategy = "proptest::option::of(0..=4usize)")]
         target_ws_idx: Option<usize>,
+        #[proptest(
+            strategy = "proptest::option::of(prop_oneof![Just(0usize), Just(usize::MAX), 0..=10usize])"
+        )]
+        target_col_idx: Option<usize>,
         activate: bool,
     },
     SwitchPresetColumnWidth,
@@ -1221,6 +1225,7 @@ impl Op {
             Op::MoveColumnToOutput {
                 output_id: id,
                 target_ws_idx,
+                target_col_idx,
                 activate,
             } => {
                 let name = format!("output{id}");
@@ -1228,7 +1233,7 @@ impl Op {
                     return;
                 };
 
-                layout.move_column_to_output(&output, target_ws_idx, activate);
+                layout.move_column_to_output(&output, target_ws_idx, target_col_idx, activate);
             }
             Op::MoveWorkspaceDown => layout.move_workspace_down(),
             Op::MoveWorkspaceUp => layout.move_workspace_up(),
@@ -3446,6 +3451,7 @@ fn move_column_to_workspace_unfocused_with_multiple_monitors() {
         Op::MoveColumnToOutput {
             output_id: 1,
             target_ws_idx: Some(0),
+            target_col_idx: None,
             activate: false,
         },
         Op::FocusOutput(1),
@@ -3902,6 +3908,334 @@ prop_compose! {
             ..Default::default()
         }
     }
+}
+
+#[test]
+fn move_column_to_output_target_col_idx_some_max_lands_at_right_edge() {
+    // Setup: output 1 has 1 column (id 1, the column we'll move).
+    //        output 2 has 2 columns (ids 2 and 3).
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddOutput(2),
+        Op::FocusOutput(2),
+        Op::AddWindow {
+            params: TestWindowParams::new(2),
+        },
+        Op::AddWindow {
+            params: TestWindowParams::new(3),
+        },
+        // Set output2's active to leftmost so after-active (= idx 1) is
+        // distinct from right-edge (= idx 2). Without this, both behaviors
+        // coincide and the test would pass trivially even if the
+        // implementation ignored target_col_idx entirely.
+        Op::FocusColumnFirst,
+        Op::FocusOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+    ];
+    let mut layout = check_ops(ops);
+
+    let output2 = layout
+        .outputs()
+        .find(|o| o.name() == "output2")
+        .cloned()
+        .unwrap();
+
+    layout.move_column_to_output(&output2, None, Some(usize::MAX), true);
+
+    let MonitorSet::Normal { monitors, .. } = &layout.monitor_set else {
+        unreachable!()
+    };
+    let mon2 = monitors
+        .iter()
+        .find(|m| m.output.name() == "output2")
+        .unwrap();
+    let scrolling = mon2.active_workspace_ref().scrolling();
+    assert_eq!(scrolling.columns().count(), 3, "dest should have 3 columns");
+    // With activate=true and target_col_idx clamped to dest len, the moved
+    // column lands at the rightmost index (2 of 3, zero-indexed).
+    assert_eq!(
+        scrolling.active_column_idx(),
+        2,
+        "moved column should be at the right edge",
+    );
+}
+
+#[test]
+fn move_column_to_output_target_col_idx_some_zero_lands_at_left_edge() {
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddOutput(2),
+        Op::FocusOutput(2),
+        Op::AddWindow {
+            params: TestWindowParams::new(2),
+        },
+        Op::AddWindow {
+            params: TestWindowParams::new(3),
+        },
+        Op::FocusOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+    ];
+    let mut layout = check_ops(ops);
+
+    let output2 = layout
+        .outputs()
+        .find(|o| o.name() == "output2")
+        .cloned()
+        .unwrap();
+
+    // RED.
+    layout.move_column_to_output(&output2, None, Some(0), true);
+
+    let MonitorSet::Normal { monitors, .. } = &layout.monitor_set else {
+        unreachable!()
+    };
+    let mon2 = monitors
+        .iter()
+        .find(|m| m.output.name() == "output2")
+        .unwrap();
+    let scrolling = mon2.active_workspace_ref().scrolling();
+    assert_eq!(scrolling.columns().count(), 3, "dest should have 3 columns");
+    assert_eq!(
+        scrolling.active_column_idx(),
+        0,
+        "moved column should be at the left edge",
+    );
+}
+
+#[test]
+fn move_column_left_or_to_output_with_adjacent_lands_at_right_edge_of_dest() {
+    let options = Options {
+        layout: niri_config::Layout {
+            cross_monitor_column_insert: CrossMonitorColumnInsert::Adjacent,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(2),
+        },
+        Op::AddWindow {
+            params: TestWindowParams::new(3),
+        },
+        // Set output1's active column to leftmost so after-active (= idx 1)
+        // is distinct from right-edge (= idx 2). Without this, the test
+        // would pass trivially under the current None-passing behavior.
+        Op::FocusColumnFirst,
+        Op::AddOutput(2),
+        Op::FocusOutput(2),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+    ];
+    let mut layout = check_ops_with_options(options, ops);
+
+    let output1 = layout
+        .outputs()
+        .find(|o| o.name() == "output1")
+        .cloned()
+        .unwrap();
+
+    // Active workspace on output2 has 1 column; move_left within the workspace
+    // returns false (already at left edge), triggering fallthrough.
+    let did_move = layout.move_column_left_or_to_output(&output1);
+    assert!(did_move, "edge-fallthrough should have triggered");
+
+    let MonitorSet::Normal { monitors, .. } = &layout.monitor_set else {
+        unreachable!()
+    };
+    let mon1 = monitors
+        .iter()
+        .find(|m| m.output.name() == "output1")
+        .unwrap();
+    let scrolling = mon1.active_workspace_ref().scrolling();
+    assert_eq!(
+        scrolling.columns().count(),
+        3,
+        "output1 should have 3 columns"
+    );
+    // Adjacent + going left = arrived from right = right edge of dest.
+    assert_eq!(
+        scrolling.active_column_idx(),
+        2,
+        "moved column should land at the right edge of the destination",
+    );
+}
+
+#[test]
+fn move_column_right_or_to_output_with_adjacent_lands_at_left_edge_of_dest() {
+    let options = Options {
+        layout: niri_config::Layout {
+            cross_monitor_column_insert: CrossMonitorColumnInsert::Adjacent,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddOutput(2),
+        Op::FocusOutput(2),
+        Op::AddWindow {
+            params: TestWindowParams::new(2),
+        },
+        Op::AddWindow {
+            params: TestWindowParams::new(3),
+        },
+        Op::FocusOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+    ];
+    let mut layout = check_ops_with_options(options, ops);
+
+    let output2 = layout
+        .outputs()
+        .find(|o| o.name() == "output2")
+        .cloned()
+        .unwrap();
+
+    let did_move = layout.move_column_right_or_to_output(&output2);
+    assert!(did_move, "edge-fallthrough should have triggered");
+
+    let MonitorSet::Normal { monitors, .. } = &layout.monitor_set else {
+        unreachable!()
+    };
+    let mon2 = monitors
+        .iter()
+        .find(|m| m.output.name() == "output2")
+        .unwrap();
+    let scrolling = mon2.active_workspace_ref().scrolling();
+    assert_eq!(
+        scrolling.columns().count(),
+        3,
+        "output2 should have 3 columns"
+    );
+    // Adjacent + going right = arrived from left = left edge of dest.
+    assert_eq!(
+        scrolling.active_column_idx(),
+        0,
+        "moved column should land at the left edge of the destination",
+    );
+}
+
+#[test]
+fn move_column_to_output_with_adjacent_and_no_direction_preserves_after_active() {
+    // Anti-pattern enforcement test: even with cross_monitor_column_insert
+    // set to Adjacent, calls to move_column_to_output that pass None for
+    // target_col_idx (mimicking Up/Down/Previous/Next/Named action handlers
+    // which have no inferable horizontal direction) MUST land the column
+    // after the destination's active column, not at any edge.
+    //
+    // Catches a future "helpful" change that wires those handlers through
+    // cross_monitor_target_col without thinking through that there's no
+    // defensible direction for them.
+    let options = Options {
+        layout: niri_config::Layout {
+            cross_monitor_column_insert: CrossMonitorColumnInsert::Adjacent,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddOutput(2),
+        Op::FocusOutput(2),
+        Op::AddWindow {
+            params: TestWindowParams::new(2),
+        },
+        Op::AddWindow {
+            params: TestWindowParams::new(3),
+        },
+        // Set output2's active to leftmost so after-active (= idx 1) is
+        // distinct from both edges (0 and 2).
+        Op::FocusColumnFirst,
+        Op::FocusOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+    ];
+    let mut layout = check_ops_with_options(options, ops);
+
+    let output2 = layout
+        .outputs()
+        .find(|o| o.name() == "output2")
+        .cloned()
+        .unwrap();
+
+    // Direct call mimicking the Up/Down/Named action handlers' code path:
+    // pass None for target_col_idx, regardless of the option.
+    layout.move_column_to_output(&output2, None, None, true);
+
+    let MonitorSet::Normal { monitors, .. } = &layout.monitor_set else {
+        unreachable!()
+    };
+    let mon2 = monitors
+        .iter()
+        .find(|m| m.output.name() == "output2")
+        .unwrap();
+    let scrolling = mon2.active_workspace_ref().scrolling();
+    assert_eq!(scrolling.columns().count(), 3);
+    // Active was at idx 0, so after-active = idx 1. NOT 0 (left edge) and NOT 2 (right edge).
+    assert_eq!(
+        scrolling.active_column_idx(),
+        1,
+        "with target_col_idx=None, after-active behavior must be preserved \
+         even when option is Adjacent",
+    );
+}
+
+#[test]
+fn move_column_to_output_target_col_idx_none_preserves_after_active_behavior() {
+    // Setup: output 2 has 2 columns; we set its active to index 0
+    // (so after-active = index 1, distinct from both edges).
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddOutput(2),
+        Op::FocusOutput(2),
+        Op::AddWindow {
+            params: TestWindowParams::new(2),
+        },
+        Op::AddWindow {
+            params: TestWindowParams::new(3),
+        },
+        Op::FocusColumnFirst,
+        Op::FocusOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+    ];
+    let mut layout = check_ops(ops);
+
+    let output2 = layout
+        .outputs()
+        .find(|o| o.name() == "output2")
+        .cloned()
+        .unwrap();
+
+    // RED.
+    layout.move_column_to_output(&output2, None, None, true);
+
+    let MonitorSet::Normal { monitors, .. } = &layout.monitor_set else {
+        unreachable!()
+    };
+    let mon2 = monitors
+        .iter()
+        .find(|m| m.output.name() == "output2")
+        .unwrap();
+    let scrolling = mon2.active_workspace_ref().scrolling();
+    assert_eq!(scrolling.columns().count(), 3, "dest should have 3 columns");
+    // None preserves after-active behavior: previous active was at 0,
+    // so the new column lands at index 1.
+    assert_eq!(
+        scrolling.active_column_idx(),
+        1,
+        "moved column should be after the previous active",
+    );
 }
 
 proptest! {
