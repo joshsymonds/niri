@@ -2364,7 +2364,7 @@ impl Niri {
             .unwrap();
 
         let mutter_x11_interop_state =
-            MutterX11InteropManagerState::new::<State, _>(&display_handle, move |_| true);
+            MutterX11InteropManagerState::new::<State, _>(&display_handle, client_is_unrestricted);
 
         #[cfg(test)]
         let single_pixel_buffer_state = SinglePixelBufferState::new::<State>(&display_handle);
