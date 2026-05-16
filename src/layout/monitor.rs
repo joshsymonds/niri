@@ -1161,18 +1161,18 @@ impl<W: LayoutElement> Monitor<W> {
     /// The four edge buffers are persistent (`focus_flash_buffers`); their size and
     /// color are refreshed by `update_render_elements` so the damage tracker only sees
     /// commit bumps when geometry or `flash_color` actually change.
-    pub fn focus_flash_render_elements(&self) -> Vec<SolidColorRenderElement> {
+    pub fn focus_flash_render_elements(&self, push: &mut dyn FnMut(SolidColorRenderElement)) {
         let alpha = self.focus_flash_alpha();
         if alpha <= 0.0 {
-            return Vec::new();
+            return;
         }
         let Some(cfg) = &self.options.layout.focus_flash else {
-            return Vec::new();
+            return;
         };
 
         let ws = &self.workspaces[self.active_workspace_idx];
         let Some(tile) = ws.active_tile() else {
-            return Vec::new();
+            return;
         };
         // Implicit cancel for the unfullscreen-mid-flash case: the moment the focused
         // tile starts leaving fullscreen, this gate flips and the edge frame stops
@@ -1180,14 +1180,14 @@ impl<W: LayoutElement> Monitor<W> {
         // itself stays in flight so the tiled focus-ring/border path keeps carrying
         // the flash on the same window.
         if tile.fullscreen_progress() < 1.0 {
-            return Vec::new();
+            return;
         }
 
         let view_w = self.view_size.w;
         let view_h = self.view_size.h;
         let edge = f64::from(cfg.edge_width);
         if edge <= 0.0 || view_w <= 0.0 || view_h <= 0.0 {
-            return Vec::new();
+            return;
         }
 
         let locations = [
@@ -1203,19 +1203,23 @@ impl<W: LayoutElement> Monitor<W> {
             cfg.sides.right,
         ];
 
-        let mut out = Vec::with_capacity(4);
         for ((buf, &loc), &on) in zip(zip(&self.focus_flash_buffers, &locations), &enabled) {
             if !on {
                 continue;
             }
-            out.push(SolidColorRenderElement::from_buffer(
+            push(SolidColorRenderElement::from_buffer(
                 buf,
                 loc,
                 alpha,
                 Kind::Unspecified,
             ));
         }
+    }
 
+    #[cfg(test)]
+    pub(super) fn focus_flash_render_elements_collected(&self) -> Vec<SolidColorRenderElement> {
+        let mut out = Vec::new();
+        self.focus_flash_render_elements(&mut |elem| out.push(elem));
         out
     }
 
@@ -1853,13 +1857,13 @@ impl<W: LayoutElement> Monitor<W> {
         // Focus-flash edge frame (fullscreen path). Pushed first so it sits on top of
         // workspace content but stays below any layer-shell or cursor element pushed
         // earlier by the caller.
-        for elem in self.focus_flash_render_elements() {
+        self.focus_flash_render_elements(&mut |elem| {
             let elem = MonitorInnerRenderElement::SolidColor(elem);
             let elem = RescaleRenderElement::from_element(elem, Point::default(), 1.);
             let elem =
                 RelocateRenderElement::from_element(elem, Point::default(), Relocate::Relative);
             push(elem);
-        }
+        });
 
         let scale = self.scale.fractional_scale();
         // Ceil the height in physical pixels.
