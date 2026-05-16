@@ -140,6 +140,8 @@ impl State {
     fn redraw_cast(&mut self, stream_id: CastStreamId) {
         let _span = tracy_client::span!("State::redraw_cast");
 
+        let locked = self.niri.is_locked();
+
         let casts = &mut self.niri.casting.casts;
         let Some(idx) = casts.iter().position(|cast| cast.stream_id == stream_id) else {
             warn!("cast to redraw is missing");
@@ -164,6 +166,20 @@ impl State {
             }
             CastTarget::Window { id } => *id,
         };
+
+        // Privacy: while the session is locked, window screencasts must not
+        // leak real window content. Output casts are gated inside render_inner;
+        // this path renders the window directly and bypasses that. Clear the
+        // buffer (like CastTarget::Nothing) so the stream stays alive and
+        // resumes automatically on unlock.
+        if locked {
+            self.backend.with_primary_renderer(|renderer| {
+                if cast.dequeue_buffer_and_clear(renderer) {
+                    cast.last_frame_time = get_monotonic_time();
+                }
+            });
+            return;
+        }
 
         // Lack of partial borrowing strikes again...
         let mut casts = mem::take(&mut self.niri.casting.casts);
@@ -641,6 +657,18 @@ impl Niri {
             let CastTarget::Window { id } = cast.target else {
                 continue;
             };
+
+            // Privacy: while the session is locked, window screencasts must not
+            // leak real window content. Output casts are gated inside
+            // render_inner (Niri::render); window casts render the window
+            // directly and bypass that. Clear the buffer so the stream stays
+            // alive and resumes automatically on unlock.
+            if self.is_locked() {
+                if cast.dequeue_buffer_and_clear(renderer) {
+                    cast.last_frame_time = target_presentation_time;
+                }
+                continue;
+            }
 
             let mut windows = self.layout.windows_for_output(output);
             let Some(mapped) = windows.find(|win| win.id().get() == id) else {
