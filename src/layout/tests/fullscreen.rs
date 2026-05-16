@@ -718,7 +718,7 @@ fn focus_flash_renders_when_fullscreen() {
     check_ops_on_layout(&mut layout, [Op::AdvanceAnimations { msec_delta: 25 }]);
 
     let mon = layout.active_monitor_ref().expect("monitor");
-    let elements = mon.focus_flash_render_elements();
+    let elements = mon.focus_flash_render_elements_collected();
     assert_eq!(
         elements.len(),
         4,
@@ -746,7 +746,7 @@ fn focus_flash_skipped_when_not_fullscreen() {
 
     let mon = layout.active_monitor_ref().expect("monitor");
     assert!(
-        mon.focus_flash_render_elements().is_empty(),
+        mon.focus_flash_render_elements_collected().is_empty(),
         "edge-frame must not render for tiled focus changes"
     );
 }
@@ -768,7 +768,7 @@ fn focus_flash_skipped_when_alpha_zero() {
 
     let mon = layout.active_monitor_ref().expect("monitor");
     assert!(
-        mon.focus_flash_render_elements().is_empty(),
+        mon.focus_flash_render_elements_collected().is_empty(),
         "edge-frame must not render when no flash is in flight"
     );
 }
@@ -800,7 +800,7 @@ fn focus_flash_partial_sides_only_renders_those() {
     check_ops_on_layout(&mut layout, [Op::AdvanceAnimations { msec_delta: 25 }]);
 
     let mon = layout.active_monitor_ref().expect("monitor");
-    let elements = mon.focus_flash_render_elements();
+    let elements = mon.focus_flash_render_elements_collected();
     assert_eq!(
         elements.len(),
         1,
@@ -972,7 +972,7 @@ fn focus_flash_unfullscreen_stops_edge_frame() {
         layout
             .active_monitor_ref()
             .expect("monitor")
-            .focus_flash_render_elements()
+            .focus_flash_render_elements_collected()
             .len(),
         4,
         "edge frame should be rendering before unfullscreen",
@@ -997,7 +997,7 @@ fn focus_flash_unfullscreen_stops_edge_frame() {
 
     let mon = layout.active_monitor_ref().expect("monitor");
     assert!(
-        mon.focus_flash_render_elements().is_empty(),
+        mon.focus_flash_render_elements_collected().is_empty(),
         "edge frame must stop rendering when the focused window unfullscreens",
     );
     assert!(
