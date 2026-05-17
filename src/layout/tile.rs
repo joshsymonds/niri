@@ -47,7 +47,8 @@ fn backdrop_clip_rects(
     tile: Rectangle<f64, Logical>,
     window: Rectangle<f64, Logical>,
     tile_corner_radius: CornerRadius,
-) -> Vec<(Rectangle<f64, Logical>, CornerRadius)> {
+    push: &mut dyn FnMut(Rectangle<f64, Logical>, CornerRadius),
+) {
     let tile_left = tile.loc.x;
     let tile_top = tile.loc.y;
     let tile_right = tile_left + tile.size.w;
@@ -61,15 +62,14 @@ fn backdrop_clip_rects(
 
     // Window doesn't overlap the tile: backdrop is the whole tile.
     if window_right <= window_left || window_bottom <= window_top {
-        return vec![(tile, tile_corner_radius)];
+        push(tile, tile_corner_radius);
+        return;
     }
-
-    let mut out = Vec::with_capacity(4);
 
     // Left bar: covers the strip left of the window, full tile height.
     // Owns the tile's top-left and bottom-left outer corners.
     if window_left > tile_left {
-        out.push((
+        push(
             Rectangle::new(
                 Point::from((tile_left, tile_top)),
                 Size::from((window_left - tile_left, tile_bottom - tile_top)),
@@ -80,13 +80,13 @@ fn backdrop_clip_rects(
                 bottom_right: 0.,
                 bottom_left: tile_corner_radius.bottom_left,
             },
-        ));
+        );
     }
 
     // Right bar: strip right of the window, full tile height.
     // Owns the tile's top-right and bottom-right outer corners.
     if window_right < tile_right {
-        out.push((
+        push(
             Rectangle::new(
                 Point::from((window_right, tile_top)),
                 Size::from((tile_right - window_right, tile_bottom - tile_top)),
@@ -97,7 +97,7 @@ fn backdrop_clip_rects(
                 bottom_right: tile_corner_radius.bottom_right,
                 bottom_left: 0.,
             },
-        ));
+        );
     }
 
     // Top middle: above the window, between (or replacing) the bars. Owns a
@@ -106,7 +106,7 @@ fn backdrop_clip_rects(
     // corners butt against bars and stay sharp; when neither bar exists
     // (letterbox), both top corners are tile-outer corners.
     if window_top > tile_top {
-        out.push((
+        push(
             Rectangle::new(
                 Point::from((window_left, tile_top)),
                 Size::from((window_right - window_left, window_top - tile_top)),
@@ -125,12 +125,12 @@ fn backdrop_clip_rects(
                 bottom_right: 0.,
                 bottom_left: 0.,
             },
-        ));
+        );
     }
 
     // Bottom middle: symmetric to top middle.
     if window_bottom < tile_bottom {
-        out.push((
+        push(
             Rectangle::new(
                 Point::from((window_left, window_bottom)),
                 Size::from((window_right - window_left, tile_bottom - window_bottom)),
@@ -149,9 +149,20 @@ fn backdrop_clip_rects(
                     0.
                 },
             },
-        ));
+        );
     }
+}
 
+#[cfg(test)]
+fn backdrop_clip_rects_collected(
+    tile: Rectangle<f64, Logical>,
+    window: Rectangle<f64, Logical>,
+    tile_corner_radius: CornerRadius,
+) -> Vec<(Rectangle<f64, Logical>, CornerRadius)> {
+    let mut out = Vec::new();
+    backdrop_clip_rects(tile, window, tile_corner_radius, &mut |rect, radius| {
+        out.push((rect, radius))
+    });
     out
 }
 
@@ -1385,7 +1396,7 @@ impl<W: LayoutElement> Tile<W> {
                     // strips at tile corners get the radius, strips that butt against the
                     // window's edge stay sharp.
                     let tile_rect = Rectangle::new(location, self.fullscreen_backdrop.size());
-                    for (geo, per_rect_radius) in backdrop_clip_rects(tile_rect, area, radius) {
+                    backdrop_clip_rects(tile_rect, area, radius, &mut |geo, per_rect_radius| {
                         let elem = BorderRenderElement::new(
                             geo.size,
                             Rectangle::from_size(geo.size),
@@ -1401,7 +1412,7 @@ impl<W: LayoutElement> Tile<W> {
                         )
                         .with_location(geo.loc);
                         push(elem.into());
-                    }
+                    });
                 } else {
                     let size = self.fullscreen_backdrop.size();
                     let elem = BorderRenderElement::new(
@@ -1422,7 +1433,7 @@ impl<W: LayoutElement> Tile<W> {
                 }
             } else if clip_backdrop {
                 let tile_rect = Rectangle::new(location, self.fullscreen_backdrop.size());
-                for (geo, _) in backdrop_clip_rects(tile_rect, area, CornerRadius::default()) {
+                backdrop_clip_rects(tile_rect, area, CornerRadius::default(), &mut |geo, _| {
                     let elem = SolidColorRenderElement::from_buffer_at(
                         &self.fullscreen_backdrop,
                         geo,
@@ -1430,7 +1441,7 @@ impl<W: LayoutElement> Tile<W> {
                         Kind::Unspecified,
                     );
                     push(elem.into());
-                }
+                });
             } else {
                 let elem = SolidColorRenderElement::from_buffer(
                     &self.fullscreen_backdrop,
@@ -1725,7 +1736,7 @@ mod tests {
     use niri_config::CornerRadius;
     use smithay::utils::{Logical, Point, Rectangle, Size};
 
-    use super::backdrop_clip_rects;
+    use super::backdrop_clip_rects_collected as backdrop_clip_rects;
 
     fn rect(x: f64, y: f64, w: f64, h: f64) -> Rectangle<f64, Logical> {
         Rectangle::new(Point::from((x, y)), Size::from((w, h)))
