@@ -28,13 +28,19 @@ rebase-patch branch:
 integration-check:
     #!/usr/bin/env bash
     set -euo pipefail
+    int_delta=$(mktemp); pat_delta=$(mktemp)
+    trap 'rm -f "$int_delta" "$pat_delta"' EXIT
     git fetch origin --quiet
     prev=origin/josh/integration
     # tooling files legitimately diverge from prev; exclude them.
     git diff --name-only "$prev" HEAD -- \
         ':!CLAUDE.md' ':!justfile' ':!INTEGRATION.md' ':!.envrc' ':!.gitignore' \
-        | sort -u > /tmp/niri-int.delta
-    : > /tmp/niri-pat.delta
+        | sort -u > "$int_delta"
+    # Branch list is parsed from merge-commit SUBJECTS, so this relies on the
+    # default `Merge branch 'josh/<topic>'` subject (or any subject containing
+    # the branch name). A merge made with a custom `-m` message that omits the
+    # branch name is excluded from the union, which only SHRINKS pat-delta and
+    # makes the gate flag more readily — fail-closed, never fail-open.
     for b in $(git log --merges --format=%s "main..HEAD" \
                  | grep -oE 'josh/[a-z0-9-]+' \
                  | grep -vx 'josh/integration' | sort -u); do
@@ -42,12 +48,12 @@ integration-check:
         git rev-parse --verify --quiet "$ref" >/dev/null || ref="$b"
         mb=$(git merge-base main "$ref" 2>/dev/null) || continue
         git diff --name-only "$mb" "$ref"
-    done | sort -u > /tmp/niri-pat.delta
-    extra=$(comm -23 /tmp/niri-int.delta /tmp/niri-pat.delta || true)
+    done | sort -u > "$pat_delta"
+    extra=$(comm -23 "$int_delta" "$pat_delta" || true)
     if [ -n "$extra" ]; then
         echo "ORACLE FAIL — integration changed files no patch branch touches:"
         echo "$extra" | sed 's/^/  /'
         echo "A merge resolution likely dropped or mangled patch content. Do NOT push."
         exit 1
     fi
-    echo "ORACLE OK — integration code delta ⊆ patch deltas ($(wc -l < /tmp/niri-int.delta | tr -d ' ') files vs $prev)"
+    echo "ORACLE OK — integration code delta ⊆ patch deltas ($(wc -l < "$int_delta" | tr -d ' ') files vs $prev)"
