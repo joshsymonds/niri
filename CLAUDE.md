@@ -15,7 +15,7 @@ Three branch tiers, each with one job:
 
 - **`main`** — fast-forward only from `upstream/main`. Never merge into it. Use `just sync-upstream` to update.
 - **`josh/<topic>`** — feature/patch branches branched **directly off `main`**. Each holds one logically separable change. **The branch *is* the upstream PR** — push it and open a PR from `joshsymonds/niri:josh/<topic>` into `YaLTeR/niri:main`. No rebase/cleanup dance.
-- **`josh/integration`** — the deploy artifact (see "Deploy model" below). It's `main` + tooling commits (`justfile`, `.envrc`, `CLAUDE.md`, `INTEGRATION.md`, `.gitignore`) + an octopus (or sequential) merge of every patch branch we want gnomon running today. **It is regenerated, not maintained**: when patches change or new ones land, hard-reset integration to main and re-run the recipe in "Re-deriving integration" below. The current set of merged patches and their upstream status is documented in `INTEGRATION.md` — keep it in sync when you re-derive. **If you're working in a `worktrees/<topic>/` worktree, see "Coordinating re-derivations" in `INTEGRATION.md` before force-pushing integration** — collisions between worktrees can drop other people's work.
+- **`josh/integration`** — the deploy artifact (see "Deploy model" below). It's `main` + persistent tooling commits (`justfile`, `.envrc`, `CLAUDE.md`, `INTEGRATION.md`, `.gitignore`) + a maintained stack of `--no-ff` merges of every patch branch we want gnomon running today. **It is maintained, not regenerated**: add or update a patch by merging its branch in and resolving conflicts once — the resolution is a durable commit that exists on every clone, with no machine-local `rr-cache` and no reset-to-`main` re-derivation. Remove a patch by reverting its merge commit. The merged set + upstream status is documented in `INTEGRATION.md` — update it in the same change. Run `just integration-check` (the oracle gate) before every build/push: the integration delta must be exactly the merged patch branches' own deltas, nothing else. **If a parallel worktree/machine also maintains integration, `git pull --ff-only` then merge into it — never reset/force a regenerated tree over it; that silently drops resolutions (see the 2026-05 rerere-stale incident: replaying a stale cross-machine `rr-cache` reverted `render-above-fullscreen` + `focus-flash` work, caught only by the oracle diff).** Patch branches still branch off `main`, so upstream PRs stay clean by construction.
 
 When making edits, know which tier you're on: feature/patch work belongs on a `josh/<topic>` branch off `main`; tooling/docs commits belong on `josh/integration` only (and survive integration regeneration via cherry-pick).
 
@@ -46,42 +46,47 @@ niri-flake = {
 
 **Always test stacked, never in isolation.** `nix-config`'s `niri-flake.inputs.niri-unstable.url` always points at `josh/integration`. To validate a patch, re-derive integration with that patch included on top of every other live patch and rebuild gnomon. Do NOT flip the input to a single patch branch for bisect/isolation testing — that hides interactions between patches. If you need to identify which of N patches caused a regression, drop suspects from the integration regen list one at a time, not by repointing the input.
 
-### Re-deriving integration
+### Maintaining integration
 
-Integration is regenerated from scratch every time the active patch set changes. There's no `rebase-integration` recipe because the inputs (which patches to merge) vary; the procedure is a few lines of plain git:
+`josh/integration` is long-lived. Conflict resolutions are durable merge
+commits — never re-derived, never machine-local. Operations:
 
 ```sh
-# 1. Capture every tooling commit since main, oldest first.
-#    The list can be one commit (squashed) or several (incremental
-#    edits). Capture the full stack so none get dropped.
-TOOLING_SHAS=$(git log main..josh/integration --reverse --format=%H \
-    -- justfile CLAUDE.md INTEGRATION.md .envrc .gitignore)
-
-# 2. Reset integration to main.
 git checkout josh/integration
-git reset --hard main
+git pull --ff-only origin josh/integration   # never clobber a parallel maintainer
 
-# 3. Replay the tooling stack in order.
-git cherry-pick $TOOLING_SHAS
+# add or update a patch (re-merging an updated branch only conflicts on
+# its new commits — small):
+git merge --no-ff josh/<topic>
 
-# 4. Octopus-merge whichever patch branches you want gnomon running.
-#    The exact list lives in INTEGRATION.md — read it first to make sure
-#    you don't drop a branch a parallel worktree just merged in.
-git merge --no-ff \
-    josh/cross-monitor-column-insert \
-    josh/zoom-screencast-fix \
-    josh/fullscreen-backdrop-clip \
-    josh/focus-flash
+# sync upstream:
+git merge --no-ff main
 
-# 5. Update INTEGRATION.md to reflect the merged set + upstream status.
-$EDITOR INTEGRATION.md && git add INTEGRATION.md && git commit -m "INTEGRATION.md: refresh after regen"
+# remove a patch (rare — the one awkward op):
+git revert -m 1 <merge-commit-of-that-patch>
 
-# 6. Verify it builds, then force-push.
-just build
-git push -f origin josh/integration
+# update INTEGRATION.md in the same change as any set change:
+$EDITOR INTEGRATION.md && git add INTEGRATION.md \
+    && git commit -m "INTEGRATION.md: <what changed>"
+
+just integration-check                       # ORACLE GATE — must pass
+just build                                   # nix sanity
+git push origin josh/integration             # plain push; -f only for history surgery
 ```
 
-If a patch is removed from gnomon's set, omit it from the merge list — that's the only "removal" mechanism. If patches conflict on the octopus merge, do them sequentially (`git merge a; git merge b; git merge c`) and resolve as you go.
+Resolve conflicts preserving **all** sides — never resolve by dropping
+a patch's content. `just integration-check` fails the change if the
+integration delta touches anything outside the merged branches' own
+deltas, which is exactly how a stale or wrong resolution is caught
+*before* it ships (the 2026-05 rerere-stale incident shipped nothing
+only because this diff was run by hand; it is now a gate).
+
+There is no reset-to-`main` regeneration and no tooling cherry-pick
+dance: tooling commits simply live on the branch. If `git push` is
+rejected because a parallel maintainer advanced origin, `git pull
+--ff-only` (or merge), re-run `just integration-check` + `just build`,
+then push again. Patch branches still branch off `main` and remain the
+clean upstream PR unit.
 
 ### Tooling that was removed (do NOT re-introduce)
 
@@ -93,14 +98,16 @@ Removed:
 - `just setup-gnomon` — installed `~/.local/bin/niri-test` wrapper on gnomon.
 - `just smoke-gnomon` — quick `niri --help` against the deployed binary.
 - `just prepare-pr` — created `pr/<topic>` off main by stripping integration's tooling commits.
-- `just rebase-integration` — replaced by the manual "Re-deriving integration" procedure above.
+- `just rebase-integration` — there is no re-derivation; integration is maintained (see "Maintaining integration").
 - `scripts/niri-test` — wrapper that ran `niri --session` from `~/.local/share/niri-test/current/bin/niri`.
 - The `pr/<topic>` branch concept — `josh/<topic>` branches are now PR-ready directly.
+- The reset-to-`main` / cherry-pick-tooling / octopus regeneration ritual, and any `rr-cache` sharing between machines — replaced by the maintained-branch model + `just integration-check`. Regeneration has no durable home for conflict resolutions and silently drops work across machines (2026-05 rerere-stale incident). Do not reintroduce "regenerate integration from scratch".
 
 The surviving recipes are fork-maintenance only:
 - `just build` — local nix-build sanity check
 - `just sync-upstream` — pull upstream main → push to fork's main
 - `just rebase-patch <branch>` — keep a patch branch on top of latest main
+- `just integration-check` — oracle gate; asserts the integration delta is exactly the merged patch branches' own deltas (run before every build/push)
 
 ## Build and dev environment
 
