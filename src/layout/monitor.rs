@@ -9,7 +9,7 @@ use smithay::backend::renderer::element::utils::{
 };
 use smithay::backend::renderer::element::Kind;
 use smithay::output::Output;
-use smithay::utils::{Logical, Point, Rectangle, Size};
+use smithay::utils::{Logical, Physical, Point, Rectangle, Size};
 
 use super::floating::FloatingRenderPass;
 use super::insert_hint_element::{InsertHintElement, InsertHintRenderElement};
@@ -1894,6 +1894,25 @@ impl<W: LayoutElement> Monitor<W> {
             )
         };
 
+        // Clip the scrolling render to the working area in normal mode so columns
+        // that scroll past the working-area edge are clipped at layer-shell
+        // exclusive zones (e.g. a left-anchored bar) instead of bleeding under
+        // them. Floating / insert-hint / focus-flash continue to use the existing
+        // `crop_bounds`: floating already clamps to the working area at the
+        // layout level, and conflating policy with render crop would clip windows
+        // a user has deliberately positioned over a transparent bar.
+        //
+        // During a workspace switch or overview transition, keep the existing
+        // bounds — see the HACK comment above for why horizontal cropping during
+        // those transitions is unsafe (pixel shaders, GTK damage-tracking bug).
+        let scrolling_crop_bounds = compute_scrolling_crop_bounds(
+            self.working_area,
+            scale,
+            self.workspace_switch.is_some(),
+            self.overview_progress.is_some(),
+            crop_bounds,
+        );
+
         let zoom = self.overview_zoom();
 
         let insert_hint_render_loc = self
@@ -1918,6 +1937,22 @@ impl<W: LayoutElement> Monitor<W> {
                 () => {{
                     &mut |elem| {
                         let elem = CropRenderElement::from_element(elem, scale, crop_bounds);
+                        if let Some(elem) = elem {
+                            let elem = MonitorInnerRenderElement::from(elem);
+                            push(scale_relocate(geo, elem));
+                        }
+                    }
+                }};
+            }
+
+            // Sibling macro for the scrolling-layer render. Identical to `push!`
+            // except it uses `scrolling_crop_bounds`, so columns that scroll past
+            // the working-area edge are clipped at layer-shell exclusive zones.
+            macro_rules! push_scrolling {
+                () => {{
+                    &mut |elem| {
+                        let elem =
+                            CropRenderElement::from_element(elem, scale, scrolling_crop_bounds);
                         if let Some(elem) = elem {
                             let elem = MonitorInnerRenderElement::from(elem);
                             push(scale_relocate(geo, elem));
@@ -1962,7 +1997,7 @@ impl<W: LayoutElement> Monitor<W> {
                 }
             }
 
-            ws.render_scrolling(ctx.r(), xray_pos, focus_ring, push!());
+            ws.render_scrolling(ctx.r(), xray_pos, focus_ring, push_scrolling!());
         }
     }
 
@@ -2379,5 +2414,127 @@ impl<W: LayoutElement> Monitor<W> {
             assert_abs_diff_eq!(pos.x, rounded_pos.x, epsilon = 1e-5);
             assert_abs_diff_eq!(pos.y, rounded_pos.y, epsilon = 1e-5);
         }
+    }
+}
+
+/// Compute the crop bounds used for the scrolling-layer render pass.
+///
+/// In normal mode this is the working area converted to physical pixels, so columns
+/// that scroll past the working-area edge are clipped at layer-shell exclusive zones
+/// (e.g. a left-anchored bar) rather than bleeding under them. During a workspace
+/// switch or overview transition the bounds match the caller's `transition_bounds`,
+/// preserving the existing infinite-horizontal-clipped-vertical crop documented by
+/// the HACK comment in `render_workspaces` (cutting pixel shaders / GTK damage).
+fn compute_scrolling_crop_bounds(
+    working_area: Rectangle<f64, Logical>,
+    scale: f64,
+    workspace_switch_active: bool,
+    overview_active: bool,
+    transition_bounds: Rectangle<i32, Physical>,
+) -> Rectangle<i32, Physical> {
+    if workspace_switch_active || overview_active {
+        return transition_bounds;
+    }
+
+    // Floor the top-left and ceil the bottom-right so the physical rectangle
+    // encloses the logical working area — never clips a partial logical pixel.
+    let left = (working_area.loc.x * scale).floor() as i32;
+    let top = (working_area.loc.y * scale).floor() as i32;
+    let right = ((working_area.loc.x + working_area.size.w) * scale).ceil() as i32;
+    let bottom = ((working_area.loc.y + working_area.size.h) * scale).ceil() as i32;
+    Rectangle::new(
+        Point::from((left, top)),
+        Size::from(((right - left).max(0), (bottom - top).max(0))),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn transition_bounds_for_view_h(view_h: f64, scale: f64) -> Rectangle<i32, Physical> {
+        let height = (view_h * scale).ceil() as i32;
+        Rectangle::new(
+            Point::from((-i32::MAX / 2, 0)),
+            Size::from((i32::MAX, height)),
+        )
+    }
+
+    #[test]
+    fn scrolling_crop_normal_mode_equals_working_area_in_physical_pixels() {
+        let working_area = Rectangle::new(Point::from((80.0, 0.0)), Size::from((1840.0, 1080.0)));
+        let transition_bounds = transition_bounds_for_view_h(1080.0, 1.0);
+
+        let bounds = compute_scrolling_crop_bounds(
+            working_area,
+            1.0,
+            /* workspace_switch_active */ false,
+            /* overview_active */ false,
+            transition_bounds,
+        );
+
+        let expected = Rectangle::new(Point::from((80, 0)), Size::from((1840, 1080)));
+        assert_eq!(bounds, expected);
+    }
+
+    #[test]
+    fn scrolling_crop_during_workspace_switch_matches_transition_bounds() {
+        let working_area = Rectangle::new(Point::from((80.0, 0.0)), Size::from((1840.0, 1080.0)));
+        let transition_bounds = transition_bounds_for_view_h(1080.0, 1.0);
+
+        let bounds = compute_scrolling_crop_bounds(
+            working_area,
+            1.0,
+            /* workspace_switch_active */ true,
+            /* overview_active */ false,
+            transition_bounds,
+        );
+
+        assert_eq!(bounds, transition_bounds);
+    }
+
+    #[test]
+    fn scrolling_crop_during_overview_matches_transition_bounds() {
+        let working_area = Rectangle::new(Point::from((80.0, 0.0)), Size::from((1840.0, 1080.0)));
+        let transition_bounds = transition_bounds_for_view_h(1080.0, 1.0);
+
+        let bounds = compute_scrolling_crop_bounds(
+            working_area,
+            1.0,
+            /* workspace_switch_active */ false,
+            /* overview_active */ true,
+            transition_bounds,
+        );
+
+        assert_eq!(bounds, transition_bounds);
+    }
+
+    #[test]
+    fn scrolling_crop_normal_mode_with_fractional_scale_encloses_working_area() {
+        // 1.5x scale: loc.x=80 → 120 physical, loc.x+size.w=1920 → 2880 physical,
+        // width = 2760. Vertically loc.y=0 → 0, size.h=1080 → 1620 physical.
+        let working_area = Rectangle::new(Point::from((80.0, 0.0)), Size::from((1840.0, 1080.0)));
+        let transition_bounds = transition_bounds_for_view_h(1080.0, 1.5);
+
+        let bounds =
+            compute_scrolling_crop_bounds(working_area, 1.5, false, false, transition_bounds);
+
+        let expected = Rectangle::new(Point::from((120, 0)), Size::from((2760, 1620)));
+        assert_eq!(bounds, expected);
+    }
+
+    #[test]
+    fn scrolling_crop_normal_mode_with_zero_size_working_area_does_not_panic() {
+        // Degenerate layer-shell config: bar exclusive zone consumes the entire
+        // horizontal space (size.w == 0). The clamp must not underflow Size.
+        let working_area = Rectangle::new(Point::from((1920.0, 0.0)), Size::from((0.0, 1080.0)));
+        let transition_bounds = transition_bounds_for_view_h(1080.0, 1.0);
+
+        let bounds =
+            compute_scrolling_crop_bounds(working_area, 1.0, false, false, transition_bounds);
+
+        // Width should be zero, not negative.
+        assert_eq!(bounds.size.w, 0);
+        assert_eq!(bounds.size.h, 1080);
     }
 }
