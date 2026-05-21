@@ -2,11 +2,12 @@
 
 This file documents what `josh/integration` currently includes. It's a
 human-maintained snapshot that lives on integration only (not on patch
-branches or main), regenerated whenever integration is.
+branches or main).
 
-When you re-derive integration via the recipe in `CLAUDE.md`, **update
-this file** so the next reader (human or agent) can tell at a glance
-what's deployed without spelunking the merge graph.
+When you add, update, or remove a patch on `josh/integration` per the
+"Maintaining integration" recipe in `CLAUDE.md`, **update this file in
+the same change** so the next reader (human or agent) can tell at a
+glance what's deployed without spelunking the merge graph.
 
 ## Patch branches in the current integration
 
@@ -63,27 +64,25 @@ patches. It's not part of any commit. Current contents:
 - `niri-pr-1791/*.patch` — the 19-commit `git format-patch` series of
   PR #1791, preserved as flat patch files for archaeology.
 
-## Coordinating re-derivations across worktrees
+## Coordinating across worktrees and machines
 
-If you're working in a `worktrees/<topic>/` subdir, your re-derivation
-of `josh/integration` may collide with another worktree's. Always
-deploy a patch by re-deriving integration on top of every other live
-patch — never point `nix-config`'s `niri-flake` input at a single
-patch branch. Testing a patch means testing it stacked with every
-other deployed patch, not in isolation. Before you force-push
-integration:
+`josh/integration` is long-lived and maintained, not regenerated.
+Conflict resolutions live as durable merge commits on the branch.
+If you're working in a `worktrees/<topic>/` subdir or on a parallel
+machine, always `git pull --ff-only origin josh/integration` before
+merging anything new in — never reset/force a regenerated tree over
+it. That silently drops resolutions (2026-05 rerere-stale incident).
 
-- Pull `origin/josh/integration` first, identify what's currently
-  merged, and include those branches in your regen — don't drop work
-  that's already deployed.
-- Update this file in the same commit so the next reader sees the truth.
+`nix-config`'s `niri-flake` input always points at `josh/integration`.
+Testing a patch means testing it stacked with every other deployed
+patch — never repoint the input at a single patch branch.
 
-## Re-deriving integration
+## Maintaining integration
 
-See "Re-deriving integration" in `CLAUDE.md`. The procedure is unchanged
-from this manifest; this file just makes the *current* state legible.
+See "Maintaining integration" in `CLAUDE.md` for the canonical recipe.
 
-When patches are added or removed:
-1. Re-run the recipe in `CLAUDE.md`.
-2. Update this file's table to match.
-3. Force-push integration.
+When patches are added, updated, or removed:
+1. Merge / re-merge / `git revert -m 1` the relevant branch into `josh/integration`.
+2. Update this file's table in the same change.
+3. Run `just integration-check` (oracle gate) and `just build`.
+4. `git push origin josh/integration` (plain push; `-f` only for history surgery).

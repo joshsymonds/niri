@@ -17,7 +17,7 @@ Three branch tiers, each with one job:
 - **`josh/<topic>`** — feature/patch branches branched **directly off `main`**. Each holds one logically separable change. **The branch *is* the upstream PR** — push it and open a PR from `joshsymonds/niri:josh/<topic>` into `YaLTeR/niri:main`. No rebase/cleanup dance.
 - **`josh/integration`** — the deploy artifact (see "Deploy model" below). It's `main` + persistent tooling commits (`justfile`, `.envrc`, `CLAUDE.md`, `INTEGRATION.md`, `.gitignore`) + a maintained stack of `--no-ff` merges of every patch branch we want gnomon running today. **It is maintained, not regenerated**: add or update a patch by merging its branch in and resolving conflicts once — the resolution is a durable commit that exists on every clone, with no machine-local `rr-cache` and no reset-to-`main` re-derivation. Remove a patch by reverting its merge commit. The merged set + upstream status is documented in `INTEGRATION.md` — update it in the same change. Run `just integration-check` (the oracle gate) before every build/push: the integration delta must be exactly the merged patch branches' own deltas, nothing else. **If a parallel worktree/machine also maintains integration, `git pull --ff-only` then merge into it — never reset/force a regenerated tree over it; that silently drops resolutions (see the 2026-05 rerere-stale incident: replaying a stale cross-machine `rr-cache` reverted `render-above-fullscreen` + `focus-flash` work, caught only by the oracle diff).** Patch branches still branch off `main`, so upstream PRs stay clean by construction.
 
-When making edits, know which tier you're on: feature/patch work belongs on a `josh/<topic>` branch off `main`; tooling/docs commits belong on `josh/integration` only (and survive integration regeneration via cherry-pick).
+When making edits, know which tier you're on: feature/patch work belongs on a `josh/<topic>` branch off `main`; tooling/docs commits belong on `josh/integration` only (they just live on the branch — see "Maintaining integration" below).
 
 ### Why patches don't branch off integration
 
@@ -39,12 +39,12 @@ niri-flake = {
 
 **Canonical deploy flow:**
 1. Land work on a `josh/<topic>` branch off `main` and push.
-2. Re-derive `josh/integration` (see below) so it includes the new branch.
-3. `git push -f origin josh/integration`.
+2. Merge the branch into `josh/integration` per "Maintaining integration" below (`git merge --no-ff josh/<topic>`, update `INTEGRATION.md`, run `just integration-check`).
+3. `git push origin josh/integration` (plain push — fast-forward; `-f` only for history surgery).
 4. In `~/nix-config`: `nix flake update niri-flake` → commit the lock bump → push.
 5. On gnomon: `nixos-rebuild switch --flake ~/nix-config#gnomon` → restart niri (logout or `systemctl --user restart niri.service`).
 
-**Always test stacked, never in isolation.** `nix-config`'s `niri-flake.inputs.niri-unstable.url` always points at `josh/integration`. To validate a patch, re-derive integration with that patch included on top of every other live patch and rebuild gnomon. Do NOT flip the input to a single patch branch for bisect/isolation testing — that hides interactions between patches. If you need to identify which of N patches caused a regression, drop suspects from the integration regen list one at a time, not by repointing the input.
+**Always test stacked, never in isolation.** `nix-config`'s `niri-flake.inputs.niri-unstable.url` always points at `josh/integration`. To validate a patch, merge it into integration on top of every other live patch and rebuild gnomon. Do NOT flip the input to a single patch branch for bisect/isolation testing — that hides interactions between patches. If you need to identify which of N patches caused a regression, revert suspect merge commits one at a time (`git revert -m 1 <merge-sha>`), not by repointing the input.
 
 ### Maintaining integration
 
@@ -174,7 +174,7 @@ Per `docs/wiki/Development:-Developing-niri.md`, levels carry meaning that's che
 ## Fork-specific gotchas
 
 - `josh/integration` carries tooling commits (`justfile`, `.envrc`, `CLAUDE.md`, `INTEGRATION.md`, `.gitignore`) that must NOT land in upstream PRs. Patch branches branch off `main` precisely so they never inherit them.
-- When updating from upstream: `just sync-upstream`, then `just rebase-patch <branch>` for each patch branch on top of new `main`, then re-derive `josh/integration` per the recipe above.
+- When updating from upstream: `just sync-upstream`, then `just rebase-patch <branch>` for each patch branch on top of new `main`, then `git merge --no-ff main` into `josh/integration` and re-merge any patch branches that changed (see "Maintaining integration" above).
 - The Nix package expression is community-maintained (header in `flake.nix`); upstream PRs touching it should be coordinated.
 - **Do NOT add ad-hoc deploy recipes to the justfile or scripts to this repo.** Deploy = bump `niri-flake.inputs.niri-unstable` in `~/nix-config` + `nixos-rebuild` on gnomon. See "Deploy model" above. The justfile recipes that exist here are *fork-maintenance only* (sync, rebase-patch).
-- **Do NOT add new config keys without checking the validator.** When adding a new option to `niri-config`'s `LayoutPart`/window rules/etc., the FIRST consumer to break is `niri-flake`'s config validator on rebuild. The fix is to push the niri change to `josh/integration` first (which means landing the patch branch, then re-deriving integration to include it), bump the flake input, rebuild — the validator uses our binary, so the new key is recognized. If you add the config in nix-config first (without bumping the flake input), gnomon's rebuild fails with "unknown node" against the upstream validator binary.
+- **Do NOT add new config keys without checking the validator.** When adding a new option to `niri-config`'s `LayoutPart`/window rules/etc., the FIRST consumer to break is `niri-flake`'s config validator on rebuild. The fix is to push the niri change to `josh/integration` first (land the patch branch, then `git merge --no-ff` it into integration per "Maintaining integration" above), bump the flake input, rebuild — the validator uses our binary, so the new key is recognized. If you add the config in nix-config first (without bumping the flake input), gnomon's rebuild fails with "unknown node" against the upstream validator binary.
