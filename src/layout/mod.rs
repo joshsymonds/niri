@@ -1774,6 +1774,20 @@ impl<W: LayoutElement> Layout<W> {
         self.monitors_mut().find(|mon| &mon.output == output)
     }
 
+    /// Returns true if the active workspace on `output` has a view-offset animation in flight.
+    ///
+    /// Used by `Niri::handle_focus_follows_mouse` to skip FFM evaluation while the scroll
+    /// position is sliding: under-cursor windows change every frame as the view animates,
+    /// so honoring FFM there races the animation and cancels a deliberate keyboard commit
+    /// on incidental mouse jitter. Sibling to the workspace-switch gate in
+    /// `should_trigger_focus_follows_mouse_on`.
+    pub fn is_view_offset_animating_on(&self, output: &Output) -> bool {
+        self.monitor_for_output(output).is_some_and(|mon| {
+            mon.active_workspace_ref()
+                .view_offset_is_animation_ongoing()
+        })
+    }
+
     pub fn monitor_for_workspace(&self, workspace_name: &str) -> Option<&Monitor<W>> {
         self.monitors().find(|monitor| {
             monitor.workspaces.iter().any(|ws| {
