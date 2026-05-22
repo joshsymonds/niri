@@ -6186,6 +6186,17 @@ impl Niri {
             return;
         }
 
+        // The view-offset is mid-animation (typically following a keyboard focus action).
+        // The window under the cursor is changing every frame as the view slides; honoring
+        // FFM here would race the animation and cancel a deliberate keyboard commit on
+        // incidental mouse jitter. Sibling to the workspace-switch animation gate in
+        // Layout::should_trigger_focus_follows_mouse_on.
+        if let Some(output) = new_focus.output.as_ref() {
+            if self.layout.is_view_offset_animating_on(output) {
+                return;
+            }
+        }
+
         // Recompute the current pointer focus because we don't update it during animations.
         let current_focus = self.contents_under(pointer.current_location());
 

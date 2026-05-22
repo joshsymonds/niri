@@ -390,6 +390,10 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             || !self.closing_windows.is_empty()
     }
 
+    pub fn view_offset_is_animation_ongoing(&self) -> bool {
+        self.view_offset.is_animation_ongoing()
+    }
+
     pub fn are_transitions_ongoing(&self) -> bool {
         !self.view_offset.is_static()
             || self.columns.iter().any(Column::are_transitions_ongoing)
