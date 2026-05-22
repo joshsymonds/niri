@@ -1905,6 +1905,10 @@ impl<W: LayoutElement> Workspace<W> {
         self.scrolling.insert_hint_area(position)
     }
 
+    pub fn view_offset_is_animation_ongoing(&self) -> bool {
+        self.scrolling.view_offset_is_animation_ongoing()
+    }
+
     pub fn view_offset_gesture_begin(&mut self, is_touchpad: bool) {
         self.scrolling.view_offset_gesture_begin(is_touchpad);
     }
