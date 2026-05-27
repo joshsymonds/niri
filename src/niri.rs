@@ -4369,6 +4369,28 @@ impl Niri {
         push_popups_from_layer!(Layer::Overlay);
         push_normal_from_layer!(Layer::Overlay);
 
+        // Screencast indicator (output casts). Drawn ABOVE workspace contents,
+        // BELOW layer-shell Overlay surfaces (so local notifications still
+        // cover it visually). Gated on RenderTarget::Output — the element
+        // cannot be constructed on a non-Output pass, so it cannot leak into
+        // the cast stream by construction.
+        #[cfg(feature = "xdp-gnome-screencast")]
+        if ctx.target == RenderTarget::Output {
+            let config = self.config.borrow();
+            let indicator_config = &config.screen_cast.indicator;
+            let output_size = output_size(output);
+            let elements = crate::render_helpers::screencast_indicator::output_indicator_elements(
+                &self.casting.active_casts,
+                output,
+                indicator_config,
+                output_size,
+                output_scale.x,
+            );
+            for elem in elements {
+                push(elem.into());
+            }
+        }
+
         // When rendering above the top layer, we put the regular monitor elements first.
         // Otherwise, we will render all layer-shell pop-ups and the top layer on top.
         if mon.render_above_top_layer() {
@@ -6539,5 +6561,6 @@ niri_render_elements! {
         Texture = PrimaryGpuTextureRenderElement,
         // Used for the CPU-rendered panels.
         RelocatedMemoryBuffer = RelocateRenderElement<MemoryRenderBufferRenderElement<R>>,
+        ScreencastIndicator = crate::render_helpers::border::BorderRenderElement,
     }
 }

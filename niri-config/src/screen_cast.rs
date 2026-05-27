@@ -101,10 +101,7 @@ mod tests {
         let sc = config.screen_cast;
         assert!(sc.hide_overlay_layer, "default hide_overlay_layer is true");
         assert!(sc.hide_top_layer, "default hide_top_layer is true");
-        assert!(
-            !sc.hide_bottom_layer,
-            "default hide_bottom_layer is false"
-        );
+        assert!(!sc.hide_bottom_layer, "default hide_bottom_layer is false");
         assert!(
             !sc.hide_background_layer,
             "default hide_background_layer is false"
@@ -114,7 +111,10 @@ mod tests {
             "default hide_zoom_non_shared_windows is true"
         );
         assert_eq!(sc.indicator.width, 0, "indicator off by default");
-        assert!(sc.indicator.color.is_none(), "indicator color None by default");
+        assert!(
+            sc.indicator.color.is_none(),
+            "indicator color None by default"
+        );
     }
 
     #[test]
