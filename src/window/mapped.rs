@@ -680,6 +680,10 @@ impl LayoutElement for Mapped {
         self.window.is_in_input_region(&surface_local)
     }
 
+    fn is_window_cast_target(&self) -> bool {
+        self.is_window_cast_target
+    }
+
     fn render_normal<R: NiriRenderer>(
         &self,
         ctx: RenderCtx<R>,

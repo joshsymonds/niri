@@ -18,7 +18,8 @@ use crate::screencasting::ActiveCasts;
 
 /// Fallback indicator color when the user hasn't set `indicator { color "..." }`.
 /// Matches the example in `resources/default-config.kdl`.
-const DEFAULT_INDICATOR_COLOR: Color = Color::new_unpremul(1.0, 85.0 / 255.0, 85.0 / 255.0, 1.0);
+pub const DEFAULT_INDICATOR_COLOR: Color =
+    Color::new_unpremul(1.0, 85.0 / 255.0, 85.0 / 255.0, 1.0);
 
 /// Build screencast-indicator border elements for `output`. Returns empty when
 /// no monitor cast targets this output OR the indicator is disabled.
