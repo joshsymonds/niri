@@ -40,6 +40,7 @@ pub mod layout;
 pub mod misc;
 pub mod output;
 pub mod recent_windows;
+pub mod screen_cast;
 pub mod utils;
 pub mod window_rule;
 pub mod workspace;
@@ -57,6 +58,7 @@ pub use crate::misc::*;
 pub use crate::output::{Output, OutputName, Outputs, Position, Vrr};
 use crate::recent_windows::RecentWindowsPart;
 pub use crate::recent_windows::{MruDirection, MruFilter, MruPreviews, MruScope, RecentWindows};
+pub use crate::screen_cast::{ScreenCast, ScreenCastIndicator};
 pub use crate::utils::FloatOrInt;
 use crate::utils::{Flag, MergeWith as _};
 pub use crate::window_rule::{
@@ -92,6 +94,7 @@ pub struct Config {
     pub debug: Debug,
     pub workspaces: Vec<Workspace>,
     pub recent_windows: RecentWindows,
+    pub screen_cast: ScreenCast,
 }
 
 #[derive(Debug, Clone)]
@@ -203,6 +206,7 @@ where
                 "xwayland-satellite" => m_merge!(xwayland_satellite),
                 "switch-events" => m_merge!(switch_events),
                 "debug" => m_merge!(debug),
+                "screen-cast" => m_merge!(screen_cast),
 
                 // Multipart sections.
                 "output" => {
@@ -2391,6 +2395,17 @@ mod tests {
                         hotkey_overlay_title: None,
                     },
                 ],
+            },
+            screen_cast: ScreenCast {
+                indicator: ScreenCastIndicator {
+                    width: 0,
+                    color: None,
+                },
+                hide_overlay_layer: true,
+                hide_top_layer: true,
+                hide_bottom_layer: false,
+                hide_background_layer: false,
+                hide_zoom_non_shared_windows: true,
             },
         }
         "#);
