@@ -23,7 +23,9 @@ use crate::render_helpers::{RenderCtx, RenderTarget};
 use crate::utils::{get_monotonic_time, CastSessionId, CastStreamId};
 use crate::window::mapped::{MappedId, WindowCastRenderElements};
 
+mod active_casts;
 mod pw_utils;
+pub use active_casts::ActiveCasts;
 use pw_utils::{Cast, CastSizeChange, CursorData, PipeWire, PwToNiri};
 
 pub struct Screencasting {
@@ -31,6 +33,12 @@ pub struct Screencasting {
 
     /// Dynamic-target casts waiting for their first target to start.
     pub pending_dynamic_casts: Vec<PendingCast>,
+
+    /// Derived snapshot of which outputs and window-ids are currently being
+    /// cast. Recomputed via [`Self::recompute_active_casts`] whenever the cast
+    /// set changes (start, target switch, stop). Read by the indicator border,
+    /// layer-hiding, and Zoom auto-hide subsystems.
+    pub active_casts: ActiveCasts,
 
     pub pw_to_niri: calloop::channel::Sender<PwToNiri>,
 
@@ -68,11 +76,20 @@ impl Screencasting {
         Self {
             casts: vec![],
             pending_dynamic_casts: vec![],
+            active_casts: ActiveCasts::default(),
             pw_to_niri,
             mapped_cast_output: HashMap::new(),
             dynamic_cast_id_for_portal: MappedId::next(),
             pipewire: None,
         }
+    }
+
+    /// Refresh [`Self::active_casts`] from the current contents of
+    /// [`Self::casts`]. Call after any change to the cast set or to any cast's
+    /// target.
+    pub fn recompute_active_casts(&mut self) {
+        self.active_casts
+            .recompute_from_targets(self.casts.iter().map(|cast| &cast.target));
     }
 }
 
@@ -296,6 +313,8 @@ impl State {
             to_redraw.push(cast.stream_id);
         }
 
+        self.niri.casting.recompute_active_casts();
+
         for id in to_redraw {
             self.redraw_cast(id);
         }
@@ -378,6 +397,8 @@ impl State {
             }
         }
 
+        self.niri.casting.recompute_active_casts();
+
         for session_id in to_stop {
             self.niri.stop_cast(session_id);
         }
@@ -455,6 +476,7 @@ impl State {
                 match res {
                     Ok(cast) => {
                         self.niri.casting.casts.push(cast);
+                        self.niri.casting.recompute_active_casts();
                     }
                     Err(err) => {
                         warn!("error starting screencast: {err:?}");
@@ -724,6 +746,8 @@ impl Niri {
                 warn!("error disconnecting stream: {err:?}");
             }
         }
+
+        self.casting.recompute_active_casts();
 
         let dbus = &self.dbus.as_ref().unwrap();
         let server = dbus.conn_screen_cast.as_ref().unwrap().object_server();
