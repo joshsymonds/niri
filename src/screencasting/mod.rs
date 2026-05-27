@@ -504,6 +504,44 @@ impl Niri {
         });
     }
 
+    /// Set or clear the Zoom auto-hide flag on each window based on:
+    /// - the user's `screen-cast.hide-zoom-non-shared-windows` config flag,
+    /// - whether any cast is currently active,
+    /// - whether the window's app-id (Wayland) or `WM_CLASS` (xwayland, exposed via xdg-shell
+    ///   app-id by xwayland-satellite) matches `zoom`/`Zoom`,
+    /// - and whether the window is NOT itself the cast target (so the window the user is actively
+    ///   sharing is never hidden from its own cast).
+    ///
+    /// Runs every `State::refresh` next to [`Self::refresh_mapped_cast_window_rules`].
+    pub fn refresh_screencast_auto_hide(&mut self) {
+        let config = self.config.borrow();
+        let enabled = config.screen_cast.hide_zoom_non_shared_windows;
+        let cast_active = !self.casting.active_casts.is_empty();
+        // Drop the borrow so `with_windows_mut` can re-borrow Niri internals.
+        drop(config);
+
+        if !enabled || !cast_active {
+            self.layout.with_windows_mut(|mapped, _| {
+                mapped.set_block_out_for_screencast_auto(false);
+            });
+            return;
+        }
+
+        let active_window_ids: HashSet<u64> = self.casting.active_casts.windows.clone();
+        self.layout.with_windows_mut(|mapped, _| {
+            let id = mapped.id().get();
+            if active_window_ids.contains(&id) {
+                // This window IS being cast — never hide it from its own cast.
+                mapped.set_block_out_for_screencast_auto(false);
+                return;
+            }
+            let app_id =
+                crate::utils::with_toplevel_role(mapped.toplevel(), |role| role.app_id.clone());
+            let is_zoom = app_id.as_deref().is_some_and(is_zoom_app_id);
+            mapped.set_block_out_for_screencast_auto(is_zoom);
+        });
+    }
+
     pub fn refresh_mapped_cast_outputs(&mut self) {
         let mut seen = HashSet::new();
         let mut output_changed = vec![];
@@ -824,5 +862,37 @@ niri_render_elements! {
         Window = WindowCastRenderElements<R>,
         Pointer = PointerRenderElements<R>,
         RelocatedPointer = RelocateRenderElement<PointerRenderElements<R>>,
+    }
+}
+
+/// Match the Zoom client across Wayland-native app-id and xwayland WM_CLASS
+/// (xwayland-satellite forwards `WM_CLASS` as the xdg-shell `app_id`). The
+/// real-world values are `zoom` (xwayland) and `Zoom Workplace` / `Zoom` on
+/// some builds — match the leading token case-insensitively, exact.
+pub fn is_zoom_app_id(app_id: &str) -> bool {
+    matches!(app_id, "zoom" | "Zoom")
+}
+
+#[cfg(test)]
+mod auto_hide_tests {
+    use super::*;
+
+    #[test]
+    fn zoom_app_id_lowercase() {
+        assert!(is_zoom_app_id("zoom"));
+    }
+
+    #[test]
+    fn zoom_app_id_titlecase() {
+        assert!(is_zoom_app_id("Zoom"));
+    }
+
+    #[test]
+    fn zoom_app_id_rejects_others() {
+        assert!(!is_zoom_app_id("zoomer"));
+        assert!(!is_zoom_app_id("ZoomCorp"));
+        assert!(!is_zoom_app_id("firefox"));
+        assert!(!is_zoom_app_id(""));
+        assert!(!is_zoom_app_id("ZOOM"));
     }
 }
