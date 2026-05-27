@@ -1,6 +1,7 @@
 /target
 /result
 /worktrees
+/.worktrees
 /reference
 
 .idea
