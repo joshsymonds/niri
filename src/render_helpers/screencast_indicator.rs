@@ -8,18 +8,15 @@
 //! output's edge). The window-cast case is a separate decoration on `Tile`
 //! and lives next to focus-ring rendering.
 
-use niri_config::{Color, CornerRadius, GradientInterpolation, ScreenCastIndicator};
+use niri_config::{
+    CornerRadius, GradientInterpolation, ScreenCastIndicator, DEFAULT_INDICATOR_COLOR,
+};
 use smithay::output::Output;
 use smithay::utils::{Logical, Point, Rectangle, Size};
 
 use crate::render_helpers::border::BorderRenderElement;
 #[cfg(feature = "xdp-gnome-screencast")]
 use crate::screencasting::ActiveCasts;
-
-/// Fallback indicator color when the user hasn't set `indicator { color "..." }`.
-/// Matches the example in `resources/default-config.kdl`.
-pub const DEFAULT_INDICATOR_COLOR: Color =
-    Color::new_unpremul(1.0, 85.0 / 255.0, 85.0 / 255.0, 1.0);
 
 /// Build screencast-indicator border elements for `output`. Returns empty when
 /// no monitor cast targets this output OR the indicator is disabled.
@@ -35,6 +32,13 @@ pub fn output_indicator_elements(
     scale: f64,
 ) -> Vec<BorderRenderElement> {
     if config.width == 0 {
+        return Vec::new();
+    }
+    // Short-circuit BEFORE `output.name()` — calling that locks Smithay's
+    // output mutex and allocates a String. Skipping it on the common "no
+    // output casts active" path saves an allocation per output per frame
+    // when the user has set width > 0 but only window-casts are running.
+    if active_casts.outputs.is_empty() {
         return Vec::new();
     }
     if !active_casts.contains_output(&output.name()) {
@@ -77,7 +81,7 @@ pub fn output_indicator_elements(
 #[cfg(test)]
 #[cfg(feature = "xdp-gnome-screencast")]
 mod tests {
-    use niri_config::ScreenCastIndicator;
+    use niri_config::{Color, ScreenCastIndicator};
     use smithay::output::{PhysicalProperties, Subpixel};
 
     use super::*;

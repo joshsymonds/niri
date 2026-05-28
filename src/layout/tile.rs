@@ -2,7 +2,7 @@ use core::f64;
 use std::rc::Rc;
 
 use niri_config::utils::MergeWith as _;
-use niri_config::{Color, CornerRadius, GradientInterpolation};
+use niri_config::{Color, CornerRadius, GradientInterpolation, DEFAULT_INDICATOR_COLOR};
 use niri_ipc::WindowLayout;
 use smithay::backend::renderer::element::{Element, Kind};
 use smithay::backend::renderer::gles::GlesRenderer;
@@ -1307,12 +1307,7 @@ impl<W: LayoutElement> Tile<W> {
             let indicator = &self.options.screen_cast_indicator;
             let width = f64::from(indicator.width);
             let width_f32 = indicator.width as f32;
-            let color = indicator.color.unwrap_or(Color::new_unpremul(
-                1.0,
-                85.0 / 255.0,
-                85.0 / 255.0,
-                1.0,
-            ));
+            let color = indicator.color.unwrap_or(DEFAULT_INDICATOR_COLOR);
             let size = animated_window_size + Size::from((width * 2.0, width * 2.0));
             let geometry = Rectangle::new(Point::from((width, width)), animated_window_size);
             let area = Rectangle::new(Point::from((0., 0.)), size);
