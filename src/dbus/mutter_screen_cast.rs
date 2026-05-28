@@ -13,10 +13,17 @@ use super::Start;
 use crate::backend::IpcOutputMap;
 use crate::utils::{CastSessionId, CastStreamId};
 
+/// Shared map of last-known window sizes keyed by window id, used by the
+/// DBus `Stream::parameters` property to report a sensible window-cast
+/// stream size to consumers. Populated by `Niri::refresh_window_cast_sizes`
+/// every State::refresh from the live layout.
+pub type WindowCastSizes = Arc<Mutex<HashMap<u64, (i32, i32)>>>;
+
 #[derive(Clone)]
 pub struct ScreenCast {
     ipc_outputs: Arc<Mutex<IpcOutputMap>>,
     to_niri: calloop::channel::Sender<ScreenCastToNiri>,
+    window_sizes: WindowCastSizes,
     #[allow(clippy::type_complexity)]
     sessions: Arc<Mutex<Vec<(Session, InterfaceRef<Session>)>>>,
 }
@@ -26,6 +33,7 @@ pub struct Session {
     id: CastSessionId,
     ipc_outputs: Arc<Mutex<IpcOutputMap>>,
     to_niri: calloop::channel::Sender<ScreenCastToNiri>,
+    window_sizes: WindowCastSizes,
     #[allow(clippy::type_complexity)]
     streams: Arc<Mutex<Vec<(Stream, InterfaceRef<Stream>)>>>,
     stopped: Arc<AtomicBool>,
@@ -67,6 +75,7 @@ pub struct Stream {
     cursor_mode: CursorMode,
     was_started: Arc<AtomicBool>,
     to_niri: calloop::channel::Sender<ScreenCastToNiri>,
+    window_sizes: WindowCastSizes,
 }
 
 #[derive(Clone)]
@@ -121,7 +130,12 @@ impl ScreenCast {
         let path = format!("/org/gnome/Mutter/ScreenCast/Session/u{}", session_id.get());
         let path = OwnedObjectPath::try_from(path).unwrap();
 
-        let session = Session::new(session_id, self.ipc_outputs.clone(), self.to_niri.clone());
+        let session = Session::new(
+            session_id,
+            self.ipc_outputs.clone(),
+            self.to_niri.clone(),
+            self.window_sizes.clone(),
+        );
         match server.at(&path, session.clone()).await {
             Ok(true) => {
                 let iface = server.interface(&path).await.unwrap();
@@ -218,6 +232,7 @@ impl Session {
             target,
             cursor_mode,
             self.to_niri.clone(),
+            self.window_sizes.clone(),
         );
         match server.at(&path, stream.clone()).await {
             Ok(true) => {
@@ -257,6 +272,7 @@ impl Session {
             target,
             cursor_mode,
             self.to_niri.clone(),
+            self.window_sizes.clone(),
         );
         match server.at(&path, stream.clone()).await {
             Ok(true) => {
@@ -294,11 +310,34 @@ impl Stream {
                     size: (logical.width as i32, logical.height as i32),
                 }
             }
-            StreamTarget::Window { .. } => {
-                // Does any consumer need this?
+            StreamTarget::Window { id } => {
+                // For window streams, the StreamParameters acts as a sizing
+                // hint for the consumer (e.g. Zoom uses it to set up its
+                // display surface) BEFORE the PipeWire stream negotiates the
+                // real buffer geometry. Returning a 1x1 stub (as we did
+                // previously) is the most defensible "no useful position"
+                // value, but some consumers (notably Zoom) appear to take
+                // this as the actual frame size and render a 1x1 area —
+                // producing the symptom of "shared window appears as black /
+                // stuck frames" on the consumer's side.
+                //
+                // Look up the last-rendered size on the shared `window_sizes`
+                // map (populated by `Niri::refresh_window_cast_sizes`). On a
+                // freshly-started window cast we may not have rendered yet,
+                // in which case we report (1920, 1080) as a sensible default
+                // hint until the first frame brings the actual size in. The
+                // PipeWire stream's params subsequently drive the real buffer
+                // geometry, so this hint going slightly stale on resize is
+                // harmless.
+                let size = self
+                    .window_sizes
+                    .lock()
+                    .ok()
+                    .and_then(|map| map.get(id).copied())
+                    .unwrap_or((1920, 1080));
                 StreamParameters {
                     position: (0, 0),
-                    size: (1, 1),
+                    size,
                 }
             }
         }
@@ -309,10 +348,12 @@ impl ScreenCast {
     pub fn new(
         ipc_outputs: Arc<Mutex<IpcOutputMap>>,
         to_niri: calloop::channel::Sender<ScreenCastToNiri>,
+        window_sizes: WindowCastSizes,
     ) -> Self {
         Self {
             ipc_outputs,
             to_niri,
+            window_sizes,
             sessions: Arc::new(Mutex::new(vec![])),
         }
     }
@@ -338,12 +379,14 @@ impl Session {
         id: CastSessionId,
         ipc_outputs: Arc<Mutex<IpcOutputMap>>,
         to_niri: calloop::channel::Sender<ScreenCastToNiri>,
+        window_sizes: WindowCastSizes,
     ) -> Self {
         Self {
             id,
             ipc_outputs,
             streams: Arc::new(Mutex::new(vec![])),
             to_niri,
+            window_sizes,
             stopped: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -364,6 +407,7 @@ impl Stream {
         target: StreamTarget,
         cursor_mode: CursorMode,
         to_niri: calloop::channel::Sender<ScreenCastToNiri>,
+        window_sizes: WindowCastSizes,
     ) -> Self {
         Self {
             id,
@@ -372,6 +416,7 @@ impl Stream {
             cursor_mode,
             was_started: Arc::new(AtomicBool::new(false)),
             to_niri,
+            window_sizes,
         }
     }
 
