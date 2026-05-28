@@ -42,6 +42,8 @@ pub mod render_elements;
 pub mod renderer;
 pub mod resize;
 pub mod resources;
+#[cfg(feature = "xdp-gnome-screencast")]
+pub mod screencast_indicator;
 pub mod shader_element;
 pub mod shaders;
 pub mod shadow;

@@ -823,6 +823,10 @@ impl State {
         // screencasts.
         #[cfg(feature = "xdp-gnome-screencast")]
         self.niri.refresh_mapped_cast_window_rules();
+        #[cfg(feature = "xdp-gnome-screencast")]
+        self.niri.refresh_window_cast_sizes();
+        #[cfg(feature = "xdp-gnome-screencast")]
+        self.niri.refresh_screencast_auto_hide();
         self.ipc_refresh_casts();
 
         self.niri.refresh_window_rules();
@@ -4380,6 +4384,28 @@ impl Niri {
         push_popups_from_layer!(Layer::Overlay);
         push_normal_from_layer!(Layer::Overlay);
 
+        // Screencast indicator (output casts). Drawn ABOVE workspace contents,
+        // BELOW layer-shell Overlay surfaces (so local notifications still
+        // cover it visually). Gated on RenderTarget::Output — the element
+        // cannot be constructed on a non-Output pass, so it cannot leak into
+        // the cast stream by construction.
+        #[cfg(feature = "xdp-gnome-screencast")]
+        if ctx.target == RenderTarget::Output {
+            let config = self.config.borrow();
+            let indicator_config = &config.screen_cast.indicator;
+            let output_size = output_size(output);
+            let elements = crate::render_helpers::screencast_indicator::output_indicator_elements(
+                &self.casting.active_casts,
+                output,
+                indicator_config,
+                output_size,
+                output_scale.x,
+            );
+            for elem in elements {
+                push(elem.into());
+            }
+        }
+
         // When rendering above the top layer, we put the regular monitor elements first.
         // Otherwise, we will render all layer-shell pop-ups and the top layer on top.
         if mon.render_above_top_layer() {
@@ -4574,6 +4600,9 @@ impl Niri {
         for_backdrop: bool,
         push: &mut dyn FnMut(LayerSurfaceRenderElement<R>),
     ) {
+        if self.screencast_hides_layer(ctx.target, layer) {
+            return;
+        }
         for (mapped, geo) in self.layers_in_render_order(layer_map, layer, for_backdrop) {
             let loc = geo.loc.to_f64();
             let xray_pos = xray_pos.offset(loc);
@@ -4592,11 +4621,25 @@ impl Niri {
         for_backdrop: bool,
         push: &mut dyn FnMut(LayerSurfaceRenderElement<R>),
     ) {
+        if self.screencast_hides_layer(ctx.target, layer) {
+            return;
+        }
         for (mapped, geo) in self.layers_in_render_order(layer_map, layer, for_backdrop) {
             let loc = geo.loc.to_f64();
             let xray_pos = xray_pos.offset(loc);
             mapped.render_popups(ctx.r(), ns, loc, xray_pos, push);
         }
+    }
+
+    /// Returns true when `layer` must be excluded from a cast/capture frame
+    /// per the user's `screen-cast { hide-*-layer ... }` config. Always false
+    /// when the render target is `Output` (the local on-screen pass).
+    ///
+    /// Applies to both `RenderTarget::Screencast` (live PipeWire cast) and
+    /// `RenderTarget::ScreenCapture` (one-shot screenshot / screencopy) so the
+    /// "no notifications in shared frames" promise extends to screenshots.
+    fn screencast_hides_layer(&self, target: RenderTarget, layer: Layer) -> bool {
+        screencast_hides_layer(&self.config.borrow().screen_cast, target, layer)
     }
 
     fn redraw(&mut self, backend: &mut Backend, output: &Output) {
@@ -6616,6 +6659,130 @@ fn scale_relocate_crop<E: Element>(
     CropRenderElement::from_element(elem, output_scale, ws_geo)
 }
 
+/// Returns true when `layer` must be excluded from a cast/capture frame per
+/// the user's `screen-cast { hide-*-layer ... }` config. Always false for
+/// `RenderTarget::Output` (the local on-screen pass) so the local experience
+/// is unaffected.
+fn screencast_hides_layer(
+    sc: &niri_config::ScreenCast,
+    target: RenderTarget,
+    layer: Layer,
+) -> bool {
+    if !matches!(
+        target,
+        RenderTarget::Screencast | RenderTarget::ScreenCapture
+    ) {
+        return false;
+    }
+    match layer {
+        Layer::Background => sc.hide_background_layer,
+        Layer::Bottom => sc.hide_bottom_layer,
+        Layer::Top => sc.hide_top_layer,
+        Layer::Overlay => sc.hide_overlay_layer,
+    }
+}
+
+#[cfg(test)]
+mod screencast_hides_layer_tests {
+    use niri_config::ScreenCast;
+
+    use super::*;
+
+    fn default_config() -> ScreenCast {
+        ScreenCast::default()
+    }
+
+    #[test]
+    fn output_target_never_hides() {
+        let sc = default_config();
+        for layer in [Layer::Background, Layer::Bottom, Layer::Top, Layer::Overlay] {
+            assert!(
+                !screencast_hides_layer(&sc, RenderTarget::Output, layer),
+                "layer {layer:?} must NOT be hidden on Output"
+            );
+        }
+    }
+
+    #[test]
+    fn screencast_target_hides_overlay_and_top_by_default() {
+        let sc = default_config();
+        assert!(screencast_hides_layer(
+            &sc,
+            RenderTarget::Screencast,
+            Layer::Overlay
+        ));
+        assert!(screencast_hides_layer(
+            &sc,
+            RenderTarget::Screencast,
+            Layer::Top
+        ));
+        assert!(!screencast_hides_layer(
+            &sc,
+            RenderTarget::Screencast,
+            Layer::Bottom
+        ));
+        assert!(!screencast_hides_layer(
+            &sc,
+            RenderTarget::Screencast,
+            Layer::Background
+        ));
+    }
+
+    #[test]
+    fn screen_capture_target_uses_same_policy_as_screencast() {
+        let sc = default_config();
+        assert!(screencast_hides_layer(
+            &sc,
+            RenderTarget::ScreenCapture,
+            Layer::Overlay
+        ));
+        assert!(!screencast_hides_layer(
+            &sc,
+            RenderTarget::ScreenCapture,
+            Layer::Background
+        ));
+    }
+
+    #[test]
+    fn flag_off_means_visible() {
+        let mut sc = default_config();
+        sc.hide_overlay_layer = false;
+        sc.hide_top_layer = false;
+        assert!(!screencast_hides_layer(
+            &sc,
+            RenderTarget::Screencast,
+            Layer::Overlay
+        ));
+        assert!(!screencast_hides_layer(
+            &sc,
+            RenderTarget::Screencast,
+            Layer::Top
+        ));
+    }
+
+    #[test]
+    fn flag_on_means_hidden() {
+        let sc = ScreenCast {
+            indicator: Default::default(),
+            hide_overlay_layer: false,
+            hide_top_layer: false,
+            hide_bottom_layer: true,
+            hide_background_layer: true,
+            hide_zoom_non_shared_windows: false,
+        };
+        assert!(screencast_hides_layer(
+            &sc,
+            RenderTarget::Screencast,
+            Layer::Bottom
+        ));
+        assert!(screencast_hides_layer(
+            &sc,
+            RenderTarget::Screencast,
+            Layer::Background
+        ));
+    }
+}
+
 niri_render_elements! {
     PointerRenderElements<R> => {
         Wayland = WaylandSurfaceRenderElement<R>,
@@ -6650,6 +6817,11 @@ niri_render_elements! {
         Texture = PrimaryGpuTextureRenderElement,
         // Used for the CPU-rendered panels.
         RelocatedMemoryBuffer = RelocateRenderElement<MemoryRenderBufferRenderElement<R>>,
+        // Only produced under `xdp-gnome-screencast` (the screencast feature gates
+        // the constructor in render_inner). The variant is declared
+        // unconditionally because `niri_render_elements!` does not support
+        // per-variant cfg attributes; the unused enum tag is one byte.
+        ScreencastIndicator = crate::render_helpers::border::BorderRenderElement,
     }
 }
 

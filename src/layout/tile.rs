@@ -2,7 +2,7 @@ use core::f64;
 use std::rc::Rc;
 
 use niri_config::utils::MergeWith as _;
-use niri_config::{Color, CornerRadius, GradientInterpolation};
+use niri_config::{Color, CornerRadius, GradientInterpolation, DEFAULT_INDICATOR_COLOR};
 use niri_ipc::WindowLayout;
 use smithay::backend::renderer::element::{Element, Kind};
 use smithay::backend::renderer::gles::GlesRenderer;
@@ -1475,6 +1475,39 @@ impl<W: LayoutElement> Tile<W> {
         if focus_ring && expanded_progress < 1. {
             self.focus_ring
                 .render(ctx.renderer, location, &mut |elem| push(elem.into()));
+        }
+
+        // Screencast indicator (window-cast variant). Drawn ONLY on the local
+        // Output pass — `RenderTarget::Output` gate is the entire safety
+        // property of the feature. The indicator never appears in cast frames
+        // by construction.
+        if matches!(ctx.target, RenderTarget::Output)
+            && self.window.is_window_cast_target()
+            && self.options.screen_cast_indicator.width > 0
+        {
+            let indicator = &self.options.screen_cast_indicator;
+            let width = f64::from(indicator.width);
+            let width_f32 = indicator.width as f32;
+            let color = indicator.color.unwrap_or(DEFAULT_INDICATOR_COLOR);
+            let size = animated_window_size + Size::from((width * 2.0, width * 2.0));
+            let geometry = Rectangle::new(Point::from((width, width)), animated_window_size);
+            let area = Rectangle::new(Point::from((0., 0.)), size);
+            let elem_loc = window_render_loc - Point::from((width, width));
+            let border = BorderRenderElement::new(
+                size,
+                area,
+                GradientInterpolation::default(),
+                color,
+                color,
+                0.,
+                geometry,
+                width_f32,
+                CornerRadius::default(),
+                self.scale as f32,
+                1.0,
+            )
+            .with_location(elem_loc);
+            push(border.into());
         }
 
         if expanded_progress < 1. {

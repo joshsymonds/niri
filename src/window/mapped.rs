@@ -100,6 +100,15 @@ pub struct Mapped {
     /// Whether this window is a target of a window cast.
     is_window_cast_target: bool,
 
+    /// Set by the Zoom auto-hide refresh (see `Niri::refresh_screencast_auto_hide`).
+    /// When true AND the render target is a cast/capture, treat this window as if
+    /// it had `block_out_from = Screencast` set — independent of any user-configured
+    /// `block_out_from` window rule, which continues to apply on top.
+    ///
+    /// Always false when no cast is active, when the Zoom auto-hide config is off,
+    /// or when this window IS the cast target.
+    block_out_for_screencast_auto: bool,
+
     /// Whether this window should ignore opacity set through window rules.
     ignore_opacity_window_rule: bool,
 
@@ -290,6 +299,7 @@ impl Mapped {
             is_active_in_column: true,
             is_floating: false,
             is_window_cast_target: false,
+            block_out_for_screencast_auto: false,
             ignore_opacity_window_rule: false,
             block_out_buffer: RefCell::new(SolidColorBuffer::new((0., 0.), [0., 0., 0., 1.])),
             blur_config: config.blur,
@@ -404,6 +414,21 @@ impl Mapped {
 
         self.is_window_cast_target = value;
         self.need_to_recompute_rules = true;
+    }
+
+    pub fn set_block_out_for_screencast_auto(&mut self, value: bool) {
+        self.block_out_for_screencast_auto = value;
+    }
+
+    /// Whether this window should be blocked out for the given render target.
+    /// Combines the user-configured `block_out_from` window rule with the
+    /// transient Zoom auto-hide flag (see [`Self::block_out_for_screencast_auto`]).
+    pub fn should_block_out(&self, target: crate::render_helpers::RenderTarget) -> bool {
+        compute_should_block_out(
+            target,
+            self.rules.block_out_from,
+            self.block_out_for_screencast_auto,
+        )
     }
 
     /// Renders a snapshot of the window without popups.
@@ -643,6 +668,10 @@ impl LayoutElement for Mapped {
         self.window.is_in_input_region(&surface_local)
     }
 
+    fn is_window_cast_target(&self) -> bool {
+        self.is_window_cast_target
+    }
+
     fn render_normal<R: NiriRenderer>(
         &self,
         ctx: RenderCtx<R>,
@@ -651,7 +680,7 @@ impl LayoutElement for Mapped {
         alpha: f32,
         push: &mut dyn FnMut(LayoutElementRenderElement<R>),
     ) {
-        if ctx.target.should_block_out(self.rules.block_out_from) {
+        if self.should_block_out(ctx.target) {
             let mut buffer = self.block_out_buffer.borrow_mut();
             buffer.resize(self.window.geometry().size.to_f64());
             let elem =
@@ -682,7 +711,7 @@ impl LayoutElement for Mapped {
         xray_pos: XrayPos,
         push: &mut dyn FnMut(LayoutElementRenderElement<R>),
     ) {
-        if ctx.target.should_block_out(self.rules.block_out_from) {
+        if self.should_block_out(ctx.target) {
             return;
         }
 
@@ -748,7 +777,7 @@ impl LayoutElement for Mapped {
         xray_pos: XrayPos,
         push: &mut dyn FnMut(BackgroundEffectElement),
     ) {
-        let should_block_out = ctx.target.should_block_out(self.rules.block_out_from);
+        let should_block_out = self.should_block_out(ctx.target);
         background_effect::render_for_tile(
             ctx,
             None,
@@ -1427,5 +1456,101 @@ impl LayoutElement for Mapped {
                 true
             }
         });
+    }
+}
+
+/// Pure helper backing [`Mapped::should_block_out`]. Extracted so unit tests
+/// can exercise the per-target / per-flag combination without constructing
+/// a full `Mapped`.
+fn compute_should_block_out(
+    target: crate::render_helpers::RenderTarget,
+    block_out_from: Option<niri_config::BlockOutFrom>,
+    block_out_for_screencast_auto: bool,
+) -> bool {
+    use crate::render_helpers::RenderTarget;
+    if target.should_block_out(block_out_from) {
+        return true;
+    }
+    if block_out_for_screencast_auto
+        && matches!(
+            target,
+            RenderTarget::Screencast | RenderTarget::ScreenCapture
+        )
+    {
+        return true;
+    }
+    false
+}
+
+#[cfg(test)]
+mod should_block_out_tests {
+    use niri_config::BlockOutFrom;
+
+    use super::*;
+    use crate::render_helpers::RenderTarget;
+
+    #[test]
+    fn auto_hide_off_means_visible_on_all_targets() {
+        for target in [
+            RenderTarget::Output,
+            RenderTarget::Screencast,
+            RenderTarget::ScreenCapture,
+        ] {
+            assert!(!compute_should_block_out(target, None, false));
+        }
+    }
+
+    #[test]
+    fn auto_hide_on_blocks_screencast_and_capture() {
+        assert!(compute_should_block_out(
+            RenderTarget::Screencast,
+            None,
+            true
+        ));
+        assert!(compute_should_block_out(
+            RenderTarget::ScreenCapture,
+            None,
+            true
+        ));
+    }
+
+    #[test]
+    fn auto_hide_on_does_not_block_output() {
+        assert!(!compute_should_block_out(RenderTarget::Output, None, true));
+    }
+
+    #[test]
+    fn user_rule_screencast_blocks_screencast_only() {
+        assert!(compute_should_block_out(
+            RenderTarget::Screencast,
+            Some(BlockOutFrom::Screencast),
+            false
+        ));
+        assert!(!compute_should_block_out(
+            RenderTarget::ScreenCapture,
+            Some(BlockOutFrom::Screencast),
+            false
+        ));
+        assert!(!compute_should_block_out(
+            RenderTarget::Output,
+            Some(BlockOutFrom::Screencast),
+            false
+        ));
+    }
+
+    #[test]
+    fn user_rule_or_auto_hide_both_block() {
+        // Either source alone is sufficient.
+        assert!(compute_should_block_out(
+            RenderTarget::Screencast,
+            Some(BlockOutFrom::Screencast),
+            true
+        ));
+        // Auto-hide layered on a more aggressive rule: still blocks.
+        assert!(compute_should_block_out(
+            RenderTarget::ScreenCapture,
+            Some(BlockOutFrom::ScreenCapture),
+            true
+        ));
     }
 }

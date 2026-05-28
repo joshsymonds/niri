@@ -23,7 +23,9 @@ use crate::render_helpers::{RenderCtx, RenderTarget};
 use crate::utils::{get_monotonic_time, CastSessionId, CastStreamId};
 use crate::window::mapped::{MappedId, WindowCastRenderElements};
 
+mod active_casts;
 mod pw_utils;
+pub use active_casts::ActiveCasts;
 use pw_utils::{Cast, CastSizeChange, CursorData, PipeWire, PwToNiri};
 
 pub struct Screencasting {
@@ -31,6 +33,22 @@ pub struct Screencasting {
 
     /// Dynamic-target casts waiting for their first target to start.
     pub pending_dynamic_casts: Vec<PendingCast>,
+
+    /// Derived snapshot of which outputs and window-ids are currently being
+    /// cast. Recomputed via [`Self::recompute_active_casts`] whenever the cast
+    /// set changes (start, target switch, stop). Read by the indicator border,
+    /// layer-hiding, and Zoom auto-hide subsystems.
+    pub active_casts: ActiveCasts,
+
+    /// Shared map of last-known physical-pixel window sizes keyed by window
+    /// id, surfaced to xdg-desktop-portal consumers via
+    /// `org.gnome.Mutter.ScreenCast.Stream.parameters`. Refreshed every
+    /// `State::refresh` from the live layout so consumers (notably Zoom) get
+    /// a usable size hint instead of the `(1, 1)` stub that previously
+    /// caused window casts to render as 1×1 / blank on the consumer side.
+    /// Physical pixels match the units the consumer's PipeWire stream uses
+    /// for its negotiated buffer geometry, so the two stay consistent.
+    pub window_cast_sizes: mutter_screen_cast::WindowCastSizes,
 
     pub pw_to_niri: calloop::channel::Sender<PwToNiri>,
 
@@ -68,11 +86,21 @@ impl Screencasting {
         Self {
             casts: vec![],
             pending_dynamic_casts: vec![],
+            active_casts: ActiveCasts::default(),
+            window_cast_sizes: Default::default(),
             pw_to_niri,
             mapped_cast_output: HashMap::new(),
             dynamic_cast_id_for_portal: MappedId::next(),
             pipewire: None,
         }
+    }
+
+    /// Refresh [`Self::active_casts`] from the current contents of
+    /// [`Self::casts`]. Call after any change to the cast set or to any cast's
+    /// target.
+    pub fn recompute_active_casts(&mut self) {
+        self.active_casts
+            .recompute_from_targets(self.casts.iter().map(|cast| &cast.target));
     }
 }
 
@@ -312,6 +340,8 @@ impl State {
             to_redraw.push(cast.stream_id);
         }
 
+        self.niri.casting.recompute_active_casts();
+
         for id in to_redraw {
             self.redraw_cast(id);
         }
@@ -394,6 +424,8 @@ impl State {
             }
         }
 
+        self.niri.casting.recompute_active_casts();
+
         for session_id in to_stop {
             self.niri.stop_cast(session_id);
         }
@@ -471,6 +503,7 @@ impl State {
                 match res {
                     Ok(cast) => {
                         self.niri.casting.casts.push(cast);
+                        self.niri.casting.recompute_active_casts();
                     }
                     Err(err) => {
                         warn!("error starting screencast: {err:?}");
@@ -495,6 +528,72 @@ impl Niri {
                 .iter()
                 .any(|cast| cast.target == (CastTarget::Window { id }));
             mapped.set_is_window_cast_target(value);
+        });
+    }
+
+    /// Refresh `Screencasting::window_cast_sizes` for every window currently
+    /// being cast, so the DBus `Stream::parameters` property can report a
+    /// sensible physical-pixel size to xdg-desktop-portal consumers (Zoom in
+    /// particular — see `mutter_screen_cast::WindowCastSizes`). Physical
+    /// pixels match the consumer's PipeWire stream geometry so the two stay
+    /// in agreement; the Mutter protocol nominally expects logical, but
+    /// PipeWire-aware consumers reconcile via the stream params anyway and a
+    /// matching unit eliminates one source of drift.
+    ///
+    /// The map only holds sizes for windows we have an active cast for; old
+    /// entries are pruned each call.
+    pub fn refresh_window_cast_sizes(&mut self) {
+        let active_windows = self.casting.active_casts.windows.clone();
+        let mut new_sizes: HashMap<u64, (i32, i32)> = HashMap::new();
+        for id in &active_windows {
+            if let Some((size_phys, _)) = self.cast_params_for_window(*id) {
+                new_sizes.insert(*id, (size_phys.w, size_phys.h));
+            }
+        }
+        if let Ok(mut map) = self.casting.window_cast_sizes.lock() {
+            *map = new_sizes;
+        }
+    }
+
+    /// Set or clear the Zoom auto-hide flag on each window based on:
+    /// - the user's `screen-cast.hide-zoom-non-shared-windows` config flag,
+    /// - whether any cast is currently active,
+    /// - whether the window's app-id (Wayland) or `WM_CLASS` (xwayland, exposed via xdg-shell
+    ///   app-id by xwayland-satellite) matches `zoom`/`Zoom`,
+    /// - and whether the window is NOT itself the cast target (so the window the user is actively
+    ///   sharing is never hidden from its own cast).
+    ///
+    /// Runs every `State::refresh` next to [`Self::refresh_mapped_cast_window_rules`].
+    pub fn refresh_screencast_auto_hide(&mut self) {
+        let config = self.config.borrow();
+        let enabled = config.screen_cast.hide_zoom_non_shared_windows;
+        let cast_active = !self.casting.active_casts.is_empty();
+        // Drop the borrow so `with_windows_mut` can re-borrow Niri internals.
+        drop(config);
+
+        if !enabled || !cast_active {
+            self.layout.with_windows_mut(|mapped, _| {
+                mapped.set_block_out_for_screencast_auto(false);
+            });
+            return;
+        }
+
+        let active_window_ids: HashSet<u64> = self.casting.active_casts.windows.clone();
+        self.layout.with_windows_mut(|mapped, _| {
+            let id = mapped.id().get();
+            if active_window_ids.contains(&id) {
+                // This window IS being cast — never hide it from its own cast.
+                mapped.set_block_out_for_screencast_auto(false);
+                return;
+            }
+            // Run the predicate inside the toplevel-role closure so we avoid
+            // cloning the app_id String on the State::refresh hot path. The
+            // closure runs under the XdgToplevelSurfaceData mutex; the
+            // predicate is a cheap `matches!` on a &str borrow.
+            let is_zoom = crate::utils::with_toplevel_role(mapped.toplevel(), |role| {
+                role.app_id.as_deref().is_some_and(is_zoom_app_id)
+            });
+            mapped.set_block_out_for_screencast_auto(is_zoom);
         });
     }
 
@@ -753,6 +852,8 @@ impl Niri {
             }
         }
 
+        self.casting.recompute_active_casts();
+
         let dbus = &self.dbus.as_ref().unwrap();
         let server = dbus.conn_screen_cast.as_ref().unwrap().object_server();
         let path = format!("/org/gnome/Mutter/ScreenCast/Session/u{}", session_id.get());
@@ -828,5 +929,40 @@ niri_render_elements! {
         Window = WindowCastRenderElements<R>,
         Pointer = PointerRenderElements<R>,
         RelocatedPointer = RelocateRenderElement<PointerRenderElements<R>>,
+    }
+}
+
+/// Match the Zoom client across Wayland-native app-id and xwayland WM_CLASS
+/// (xwayland-satellite forwards `WM_CLASS` as the xdg-shell `app_id`).
+///
+/// Matched exactly, case-sensitively, against `"zoom"` (xwayland WM_CLASS on
+/// Linux Zoom builds) or `"Zoom"`. Variants like `"Zoom Workplace"` or
+/// `"ZOOM"` are NOT matched — this matches the epic-spec regex `^[Zz]oom$`.
+/// Widen here if a future Zoom build ships under a different app-id.
+pub fn is_zoom_app_id(app_id: &str) -> bool {
+    matches!(app_id, "zoom" | "Zoom")
+}
+
+#[cfg(test)]
+mod auto_hide_tests {
+    use super::*;
+
+    #[test]
+    fn zoom_app_id_lowercase() {
+        assert!(is_zoom_app_id("zoom"));
+    }
+
+    #[test]
+    fn zoom_app_id_titlecase() {
+        assert!(is_zoom_app_id("Zoom"));
+    }
+
+    #[test]
+    fn zoom_app_id_rejects_others() {
+        assert!(!is_zoom_app_id("zoomer"));
+        assert!(!is_zoom_app_id("ZoomCorp"));
+        assert!(!is_zoom_app_id("firefox"));
+        assert!(!is_zoom_app_id(""));
+        assert!(!is_zoom_app_id("ZOOM"));
     }
 }

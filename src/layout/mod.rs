@@ -152,6 +152,15 @@ pub trait LayoutElement {
     /// Corresponds to the Wayland window geometry size.
     fn size(&self) -> Size<i32, Logical>;
 
+    /// Whether this element is the target of an active screencast.
+    ///
+    /// Default `false`. `Mapped` overrides this to reflect the transient flag
+    /// set by `Niri::refresh_mapped_cast_window_rules`. Used to drive the
+    /// per-window screencast indicator decoration.
+    fn is_window_cast_target(&self) -> bool {
+        false
+    }
+
     /// Returns the location of the element's buffer relative to the element's visual geometry.
     ///
     /// I.e. if the element has CSD shadows, its buffer location will have negative coordinates.
@@ -427,6 +436,8 @@ pub struct Options {
     pub gestures: niri_config::Gestures,
     pub overview: niri_config::Overview,
     pub blur: niri_config::Blur,
+    /// Used by the per-window screencast indicator decoration in `Tile`.
+    pub screen_cast_indicator: niri_config::ScreenCastIndicator,
     // Debug flags.
     pub disable_resize_throttling: bool,
     pub disable_transactions: bool,
@@ -688,6 +699,7 @@ impl Options {
             gestures: config.gestures,
             overview: config.overview,
             blur: config.blur,
+            screen_cast_indicator: config.screen_cast.indicator,
             disable_resize_throttling: config.debug.disable_resize_throttling,
             disable_transactions: config.debug.disable_transactions,
             deactivate_unfocused_windows: config.debug.deactivate_unfocused_windows,

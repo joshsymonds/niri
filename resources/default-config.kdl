@@ -319,6 +319,30 @@ animations {
     // slowdown 3.0
 }
 
+// Screen-cast appearance and overlay filtering.
+// By default: layer-shell overlays (notifications, panels at Top/Overlay)
+// are hidden from the cast stream; wallpaper/bottom-layer surfaces are kept.
+// Zoom's non-shared windows (toolbar, gallery) are hidden during a cast.
+// The indicator border draws around the cast target on the local screen only —
+// it never appears in the cast frames themselves.
+// screen-cast {
+//     indicator {
+//         // Border thickness in logical pixels. 0 disables it.
+//         width 2
+//         // Any CSS color.
+//         color "#ff5555"
+//     }
+//
+//     // Per-layer-shell-layer toggles. Defaults shown.
+//     hide-overlay-layer true
+//     hide-top-layer true
+//     hide-bottom-layer false
+//     hide-background-layer false
+//
+//     // Auto-hide Zoom client's non-shared windows during a cast.
+//     hide-zoom-non-shared-windows true
+// }
+
 // Window rules let you adjust behavior for individual windows.
 // Find more information on the wiki:
 // https://niri-wm.github.io/niri/Configuration:-Window-Rules
