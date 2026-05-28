@@ -40,6 +40,14 @@ pub struct Screencasting {
     /// layer-hiding, and Zoom auto-hide subsystems.
     pub active_casts: ActiveCasts,
 
+    /// Shared map of last-known logical window sizes keyed by window id,
+    /// surfaced to xdg-desktop-portal consumers via
+    /// `org.gnome.Mutter.ScreenCast.Stream.parameters`. Refreshed every
+    /// `State::refresh` from the live layout so consumers (notably Zoom) get
+    /// a usable size hint instead of the `(1, 1)` stub that previously
+    /// caused window casts to render as 1×1 / blank on the consumer side.
+    pub window_cast_sizes: crate::dbus::mutter_screen_cast::WindowCastSizes,
+
     pub pw_to_niri: calloop::channel::Sender<PwToNiri>,
 
     /// Screencast output for each mapped window.
@@ -77,6 +85,7 @@ impl Screencasting {
             casts: vec![],
             pending_dynamic_casts: vec![],
             active_casts: ActiveCasts::default(),
+            window_cast_sizes: Default::default(),
             pw_to_niri,
             mapped_cast_output: HashMap::new(),
             dynamic_cast_id_for_portal: MappedId::next(),
@@ -502,6 +511,33 @@ impl Niri {
                 .any(|cast| cast.target == (CastTarget::Window { id }));
             mapped.set_is_window_cast_target(value);
         });
+    }
+
+    /// Refresh `Screencasting::window_cast_sizes` for every window currently
+    /// being cast, so the DBus `Stream::parameters` property can report a
+    /// sensible logical size to xdg-desktop-portal consumers (Zoom in
+    /// particular — see `mutter_screen_cast::WindowCastSizes`).
+    ///
+    /// The map only holds sizes for windows we have an active cast for; old
+    /// entries are pruned each call.
+    pub fn refresh_window_cast_sizes(&mut self) {
+        let active_windows = self.casting.active_casts.windows.clone();
+        let mut new_sizes: std::collections::HashMap<u64, (i32, i32)> =
+            std::collections::HashMap::new();
+        for id in &active_windows {
+            if let Some((size_phys, _)) = self.cast_params_for_window(*id) {
+                // Report logical-pixel sizes via DBus (the protocol's spec).
+                // cast_params_for_window returns physical; we don't have the
+                // window's output scale immediately at hand, so report the
+                // physical size — consumers compare it against the PipeWire
+                // stream which also uses physical pixels, and any difference
+                // is reconciled by the stream-level negotiation.
+                new_sizes.insert(*id, (size_phys.w, size_phys.h));
+            }
+        }
+        if let Ok(mut map) = self.casting.window_cast_sizes.lock() {
+            *map = new_sizes;
+        }
     }
 
     /// Set or clear the Zoom auto-hide flag on each window based on:

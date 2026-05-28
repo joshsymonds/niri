@@ -127,7 +127,11 @@ impl DBusServers {
                         }
                     })
                     .unwrap();
-                let screen_cast = ScreenCast::new(backend.ipc_outputs(), to_niri);
+                let screen_cast = ScreenCast::new(
+                    backend.ipc_outputs(),
+                    to_niri,
+                    niri.casting.window_cast_sizes.clone(),
+                );
                 dbus.conn_screen_cast = try_start(screen_cast);
             }
 

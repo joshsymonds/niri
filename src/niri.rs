@@ -824,6 +824,8 @@ impl State {
         #[cfg(feature = "xdp-gnome-screencast")]
         self.niri.refresh_mapped_cast_window_rules();
         #[cfg(feature = "xdp-gnome-screencast")]
+        self.niri.refresh_window_cast_sizes();
+        #[cfg(feature = "xdp-gnome-screencast")]
         self.niri.refresh_screencast_auto_hide();
         self.ipc_refresh_casts();
 
