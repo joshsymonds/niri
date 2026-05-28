@@ -6651,7 +6651,7 @@ mod screencast_hides_layer_tests {
 
     #[test]
     fn flag_on_means_hidden() {
-        let mut sc = ScreenCast {
+        let sc = ScreenCast {
             indicator: Default::default(),
             hide_overlay_layer: false,
             hide_top_layer: false,
@@ -6659,7 +6659,6 @@ mod screencast_hides_layer_tests {
             hide_background_layer: true,
             hide_zoom_non_shared_windows: false,
         };
-        let _ = &mut sc; // suppress unused mut warning above when fields read-only
         assert!(screencast_hides_layer(
             &sc,
             RenderTarget::Screencast,
@@ -6707,6 +6706,10 @@ niri_render_elements! {
         Texture = PrimaryGpuTextureRenderElement,
         // Used for the CPU-rendered panels.
         RelocatedMemoryBuffer = RelocateRenderElement<MemoryRenderBufferRenderElement<R>>,
+        // Only produced under `xdp-gnome-screencast` (the screencast feature gates
+        // the constructor in render_inner). The variant is declared
+        // unconditionally because `niri_render_elements!` does not support
+        // per-variant cfg attributes; the unused enum tag is one byte.
         ScreencastIndicator = crate::render_helpers::border::BorderRenderElement,
     }
 }

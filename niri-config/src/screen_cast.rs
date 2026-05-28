@@ -1,6 +1,15 @@
 use crate::appearance::Color;
 use crate::utils::{Flag, MergeWith};
 
+/// Fallback indicator color when the user hasn't set `indicator { color "..." }`.
+/// Lives in niri-config (not the renderer module) so both the output and
+/// per-window render paths can reference it without depending on the
+/// `xdp-gnome-screencast` feature gate.
+///
+/// Matches the example in `resources/default-config.kdl`.
+pub const DEFAULT_INDICATOR_COLOR: Color =
+    Color::new_unpremul(1.0, 85.0 / 255.0, 85.0 / 255.0, 1.0);
+
 /// Configuration for screencast appearance and overlay-filtering policy. Read
 /// by the indicator-border render path, the screencast layer-shell filter, and
 /// the Zoom auto-hide policy when at least one cast is active. Always parsed,

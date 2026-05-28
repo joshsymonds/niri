@@ -58,7 +58,7 @@ pub use crate::misc::*;
 pub use crate::output::{Output, OutputName, Outputs, Position, Vrr};
 use crate::recent_windows::RecentWindowsPart;
 pub use crate::recent_windows::{MruDirection, MruFilter, MruPreviews, MruScope, RecentWindows};
-pub use crate::screen_cast::{ScreenCast, ScreenCastIndicator};
+pub use crate::screen_cast::{ScreenCast, ScreenCastIndicator, DEFAULT_INDICATOR_COLOR};
 pub use crate::utils::FloatOrInt;
 use crate::utils::{Flag, MergeWith as _};
 pub use crate::window_rule::{

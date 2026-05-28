@@ -416,10 +416,6 @@ impl Mapped {
         self.need_to_recompute_rules = true;
     }
 
-    pub fn block_out_for_screencast_auto(&self) -> bool {
-        self.block_out_for_screencast_auto
-    }
-
     pub fn set_block_out_for_screencast_auto(&mut self, value: bool) {
         self.block_out_for_screencast_auto = value;
     }
@@ -428,19 +424,11 @@ impl Mapped {
     /// Combines the user-configured `block_out_from` window rule with the
     /// transient Zoom auto-hide flag (see [`Self::block_out_for_screencast_auto`]).
     pub fn should_block_out(&self, target: crate::render_helpers::RenderTarget) -> bool {
-        use crate::render_helpers::RenderTarget;
-        if target.should_block_out(self.rules.block_out_from) {
-            return true;
-        }
-        if self.block_out_for_screencast_auto
-            && matches!(
-                target,
-                RenderTarget::Screencast | RenderTarget::ScreenCapture
-            )
-        {
-            return true;
-        }
-        false
+        compute_should_block_out(
+            target,
+            self.rules.block_out_from,
+            self.block_out_for_screencast_auto,
+        )
     }
 
     /// Renders a snapshot of the window without popups.
@@ -1468,5 +1456,101 @@ impl LayoutElement for Mapped {
                 true
             }
         });
+    }
+}
+
+/// Pure helper backing [`Mapped::should_block_out`]. Extracted so unit tests
+/// can exercise the per-target / per-flag combination without constructing
+/// a full `Mapped`.
+fn compute_should_block_out(
+    target: crate::render_helpers::RenderTarget,
+    block_out_from: Option<niri_config::BlockOutFrom>,
+    block_out_for_screencast_auto: bool,
+) -> bool {
+    use crate::render_helpers::RenderTarget;
+    if target.should_block_out(block_out_from) {
+        return true;
+    }
+    if block_out_for_screencast_auto
+        && matches!(
+            target,
+            RenderTarget::Screencast | RenderTarget::ScreenCapture
+        )
+    {
+        return true;
+    }
+    false
+}
+
+#[cfg(test)]
+mod should_block_out_tests {
+    use niri_config::BlockOutFrom;
+
+    use super::*;
+    use crate::render_helpers::RenderTarget;
+
+    #[test]
+    fn auto_hide_off_means_visible_on_all_targets() {
+        for target in [
+            RenderTarget::Output,
+            RenderTarget::Screencast,
+            RenderTarget::ScreenCapture,
+        ] {
+            assert!(!compute_should_block_out(target, None, false));
+        }
+    }
+
+    #[test]
+    fn auto_hide_on_blocks_screencast_and_capture() {
+        assert!(compute_should_block_out(
+            RenderTarget::Screencast,
+            None,
+            true
+        ));
+        assert!(compute_should_block_out(
+            RenderTarget::ScreenCapture,
+            None,
+            true
+        ));
+    }
+
+    #[test]
+    fn auto_hide_on_does_not_block_output() {
+        assert!(!compute_should_block_out(RenderTarget::Output, None, true));
+    }
+
+    #[test]
+    fn user_rule_screencast_blocks_screencast_only() {
+        assert!(compute_should_block_out(
+            RenderTarget::Screencast,
+            Some(BlockOutFrom::Screencast),
+            false
+        ));
+        assert!(!compute_should_block_out(
+            RenderTarget::ScreenCapture,
+            Some(BlockOutFrom::Screencast),
+            false
+        ));
+        assert!(!compute_should_block_out(
+            RenderTarget::Output,
+            Some(BlockOutFrom::Screencast),
+            false
+        ));
+    }
+
+    #[test]
+    fn user_rule_or_auto_hide_both_block() {
+        // Either source alone is sufficient.
+        assert!(compute_should_block_out(
+            RenderTarget::Screencast,
+            Some(BlockOutFrom::Screencast),
+            true
+        ));
+        // Auto-hide layered on a more aggressive rule: still blocks.
+        assert!(compute_should_block_out(
+            RenderTarget::ScreenCapture,
+            Some(BlockOutFrom::ScreenCapture),
+            true
+        ));
     }
 }

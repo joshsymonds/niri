@@ -40,13 +40,15 @@ pub struct Screencasting {
     /// layer-hiding, and Zoom auto-hide subsystems.
     pub active_casts: ActiveCasts,
 
-    /// Shared map of last-known logical window sizes keyed by window id,
-    /// surfaced to xdg-desktop-portal consumers via
+    /// Shared map of last-known physical-pixel window sizes keyed by window
+    /// id, surfaced to xdg-desktop-portal consumers via
     /// `org.gnome.Mutter.ScreenCast.Stream.parameters`. Refreshed every
     /// `State::refresh` from the live layout so consumers (notably Zoom) get
     /// a usable size hint instead of the `(1, 1)` stub that previously
     /// caused window casts to render as 1×1 / blank on the consumer side.
-    pub window_cast_sizes: crate::dbus::mutter_screen_cast::WindowCastSizes,
+    /// Physical pixels match the units the consumer's PipeWire stream uses
+    /// for its negotiated buffer geometry, so the two stay consistent.
+    pub window_cast_sizes: mutter_screen_cast::WindowCastSizes,
 
     pub pw_to_niri: calloop::channel::Sender<PwToNiri>,
 
@@ -515,23 +517,20 @@ impl Niri {
 
     /// Refresh `Screencasting::window_cast_sizes` for every window currently
     /// being cast, so the DBus `Stream::parameters` property can report a
-    /// sensible logical size to xdg-desktop-portal consumers (Zoom in
-    /// particular — see `mutter_screen_cast::WindowCastSizes`).
+    /// sensible physical-pixel size to xdg-desktop-portal consumers (Zoom in
+    /// particular — see `mutter_screen_cast::WindowCastSizes`). Physical
+    /// pixels match the consumer's PipeWire stream geometry so the two stay
+    /// in agreement; the Mutter protocol nominally expects logical, but
+    /// PipeWire-aware consumers reconcile via the stream params anyway and a
+    /// matching unit eliminates one source of drift.
     ///
     /// The map only holds sizes for windows we have an active cast for; old
     /// entries are pruned each call.
     pub fn refresh_window_cast_sizes(&mut self) {
         let active_windows = self.casting.active_casts.windows.clone();
-        let mut new_sizes: std::collections::HashMap<u64, (i32, i32)> =
-            std::collections::HashMap::new();
+        let mut new_sizes: HashMap<u64, (i32, i32)> = HashMap::new();
         for id in &active_windows {
             if let Some((size_phys, _)) = self.cast_params_for_window(*id) {
-                // Report logical-pixel sizes via DBus (the protocol's spec).
-                // cast_params_for_window returns physical; we don't have the
-                // window's output scale immediately at hand, so report the
-                // physical size — consumers compare it against the PipeWire
-                // stream which also uses physical pixels, and any difference
-                // is reconciled by the stream-level negotiation.
                 new_sizes.insert(*id, (size_phys.w, size_phys.h));
             }
         }
@@ -571,9 +570,13 @@ impl Niri {
                 mapped.set_block_out_for_screencast_auto(false);
                 return;
             }
-            let app_id =
-                crate::utils::with_toplevel_role(mapped.toplevel(), |role| role.app_id.clone());
-            let is_zoom = app_id.as_deref().is_some_and(is_zoom_app_id);
+            // Run the predicate inside the toplevel-role closure so we avoid
+            // cloning the app_id String on the State::refresh hot path. The
+            // closure runs under the XdgToplevelSurfaceData mutex; the
+            // predicate is a cheap `matches!` on a &str borrow.
+            let is_zoom = crate::utils::with_toplevel_role(mapped.toplevel(), |role| {
+                role.app_id.as_deref().is_some_and(is_zoom_app_id)
+            });
             mapped.set_block_out_for_screencast_auto(is_zoom);
         });
     }
@@ -902,9 +905,12 @@ niri_render_elements! {
 }
 
 /// Match the Zoom client across Wayland-native app-id and xwayland WM_CLASS
-/// (xwayland-satellite forwards `WM_CLASS` as the xdg-shell `app_id`). The
-/// real-world values are `zoom` (xwayland) and `Zoom Workplace` / `Zoom` on
-/// some builds — match the leading token case-insensitively, exact.
+/// (xwayland-satellite forwards `WM_CLASS` as the xdg-shell `app_id`).
+///
+/// Matched exactly, case-sensitively, against `"zoom"` (xwayland WM_CLASS on
+/// Linux Zoom builds) or `"Zoom"`. Variants like `"Zoom Workplace"` or
+/// `"ZOOM"` are NOT matched — this matches the epic-spec regex `^[Zz]oom$`.
+/// Widen here if a future Zoom build ships under a different app-id.
 pub fn is_zoom_app_id(app_id: &str) -> bool {
     matches!(app_id, "zoom" | "Zoom")
 }

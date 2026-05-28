@@ -13,10 +13,12 @@ use super::Start;
 use crate::backend::IpcOutputMap;
 use crate::utils::{CastSessionId, CastStreamId};
 
-/// Shared map of last-known window sizes keyed by window id, used by the
-/// DBus `Stream::parameters` property to report a sensible window-cast
-/// stream size to consumers. Populated by `Niri::refresh_window_cast_sizes`
-/// every State::refresh from the live layout.
+/// Shared map of last-known physical-pixel window sizes keyed by window id,
+/// used by the DBus `Stream::parameters` property to report a usable
+/// window-cast stream size to consumers. Populated by
+/// `Niri::refresh_window_cast_sizes` every `State::refresh` from the live
+/// layout — see that function's doc for why physical (not logical) is the
+/// right unit here.
 pub type WindowCastSizes = Arc<Mutex<HashMap<u64, (i32, i32)>>>;
 
 #[derive(Clone)]
