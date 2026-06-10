@@ -66,7 +66,7 @@ use crate::render_helpers::snapshot::RenderSnapshot;
 use crate::render_helpers::solid_color::{SolidColorBuffer, SolidColorRenderElement};
 use crate::render_helpers::texture::TextureBuffer;
 use crate::render_helpers::xray::{Xray, XrayPos};
-use crate::render_helpers::{BakedBuffer, RenderCtx};
+use crate::render_helpers::{BakedBuffer, RenderCtx, RenderTarget};
 use crate::rubber_band::RubberBand;
 use crate::utils::transaction::{Transaction, TransactionBlocker};
 use crate::utils::{
@@ -164,6 +164,17 @@ pub trait LayoutElement {
     ///
     /// The point is relative to the element's visual geometry.
     fn is_in_input_region(&self, point: Point<f64, Logical>) -> bool;
+
+    /// Whether to omit this element's entire tile from cast and capture renders.
+    ///
+    /// Unlike block-out (which paints an opaque placeholder over the window contents),
+    /// exclusion renders nothing at all — no contents, no decorations — so whatever is
+    /// underneath shows through in the captured frame. On-screen rendering
+    /// ([`RenderTarget::Output`]) is never excluded.
+    fn exclude_from_cast(&self, target: RenderTarget) -> bool {
+        let _ = target;
+        false
+    }
 
     /// Renders the element at the given visual location.
     ///
