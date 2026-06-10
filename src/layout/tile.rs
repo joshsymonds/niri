@@ -1538,6 +1538,12 @@ impl<W: LayoutElement> Tile<W> {
     ) {
         let _span = tracy_client::span!("Tile::render");
 
+        // Cast-excluded windows are omitted entirely: contents, decorations, animations.
+        // This is the single chokepoint all tile rendering funnels through.
+        if self.window().exclude_from_cast(ctx.target) {
+            return;
+        }
+
         let scale = Scale::from(self.scale);
 
         let tile_alpha = self
