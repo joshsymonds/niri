@@ -1528,23 +1528,15 @@ impl Cast {
                 let fd = (*(*spa_buffer).datas).fd;
                 let shmbuf = self.inner.borrow().shmbufs[&fd].clone();
 
-                match clear_shmbuf(&shmbuf) {
-                    Ok(()) => {
-                        mark_buffer_after_render(
-                            pw_buffer,
-                            &mut self.sequence_counter,
-                            SharingBuf::Shm(&shmbuf),
-                        );
-                        trace!("queueing clear buffer with seq={}", self.sequence_counter);
-                        self.queue_after_sync(pw_buffer, SyncPoint::signaled());
-                        true
-                    }
-                    Err(err) => {
-                        warn!("error clearing shmbuf: {err:?}");
-                        return_unused_buffer(&self.stream, pw_buffer);
-                        false
-                    }
-                }
+                clear_shmbuf(&shmbuf);
+                mark_buffer_after_render(
+                    pw_buffer,
+                    &mut self.sequence_counter,
+                    SharingBuf::Shm(&shmbuf),
+                );
+                trace!("queueing clear buffer with seq={}", self.sequence_counter);
+                self.queue_after_sync(pw_buffer, SyncPoint::signaled());
+                true
             } else {
                 warn!("unknown data type in dequeue_buffer_and_clear");
                 false
@@ -1652,6 +1644,22 @@ pub struct Shmbuf {
     fd: Rc<rustix::fd::OwnedFd>,
     stride: usize,
     size: usize,
+    /// Persistent writable mapping of the whole buffer, created once at allocation.
+    mapping: Rc<ShmMapping>,
+}
+
+#[derive(Debug)]
+struct ShmMapping {
+    ptr: NonNull<std::ffi::c_void>,
+    len: usize,
+}
+
+impl Drop for ShmMapping {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = rustix::mm::munmap(self.ptr.as_ptr(), self.len);
+        }
+    }
 }
 
 enum SharingBuf<'a> {
@@ -1674,10 +1682,26 @@ fn allocate_shmbuf(size: Size<u32, Physical>) -> anyhow::Result<Shmbuf> {
         rustix::fs::SealFlags::SEAL | rustix::fs::SealFlags::SHRINK | rustix::fs::SealFlags::GROW,
     )
     .context("error sealing the fd")?;
+    let ptr = unsafe {
+        rustix::mm::mmap(
+            std::ptr::null_mut(),
+            size,
+            rustix::mm::ProtFlags::READ | rustix::mm::ProtFlags::WRITE,
+            rustix::mm::MapFlags::SHARED,
+            &fd,
+            0,
+        )
+        .context("error mapping the fd")?
+    };
+    let mapping = ShmMapping {
+        ptr: NonNull::new(ptr).context("mmap returned null")?,
+        len: size,
+    };
     Ok(Shmbuf {
         fd: fd.into(),
         size,
         stride,
+        mapping: Rc::new(mapping),
     })
 }
 
@@ -1916,19 +1940,52 @@ unsafe fn add_cursor_metadata(
     }
 }
 
-fn clear_shmbuf(shmbuf: &Shmbuf) -> anyhow::Result<()> {
-    let bytes: Vec<u8> = vec![0u8; shmbuf.size];
+fn clear_shmbuf(shmbuf: &Shmbuf) {
     unsafe {
-        let buf = rustix::mm::mmap(
-            std::ptr::null_mut(),
-            shmbuf.size,
-            rustix::mm::ProtFlags::READ | rustix::mm::ProtFlags::WRITE,
-            rustix::mm::MapFlags::SHARED,
-            shmbuf.fd.clone(),
-            0,
-        )?;
-        ptr::copy_nonoverlapping(bytes.as_ptr(), buf.cast(), shmbuf.size);
-        rustix::mm::munmap(buf, shmbuf.size).unwrap();
+        ptr::write_bytes::<u8>(shmbuf.mapping.ptr.as_ptr().cast(), 0, shmbuf.size);
     }
-    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::unix::fs::FileExt;
+
+    use super::*;
+
+    fn read_via_fd(shmbuf: &Shmbuf) -> Vec<u8> {
+        let file = std::fs::File::from(shmbuf.fd.try_clone().unwrap());
+        let mut bytes = vec![0xFFu8; shmbuf.size];
+        file.read_exact_at(&mut bytes, 0).unwrap();
+        bytes
+    }
+
+    #[test]
+    fn shmbuf_mapping_is_persistent_and_visible_through_fd() {
+        let shmbuf = allocate_shmbuf(Size::from((4, 2))).unwrap();
+        assert_eq!(shmbuf.size, 4 * 2 * SHM_BYTES_PER_PIXEL);
+        assert_eq!(shmbuf.mapping.len, shmbuf.size);
+
+        let pattern: Vec<u8> = (0..shmbuf.size).map(|i| i as u8).collect();
+        unsafe {
+            ptr::copy_nonoverlapping(
+                pattern.as_ptr(),
+                shmbuf.mapping.ptr.as_ptr().cast(),
+                shmbuf.size,
+            );
+        }
+
+        assert_eq!(read_via_fd(&shmbuf), pattern);
+    }
+
+    #[test]
+    fn clear_shmbuf_zeroes_contents() {
+        let shmbuf = allocate_shmbuf(Size::from((4, 2))).unwrap();
+        unsafe {
+            ptr::write_bytes::<u8>(shmbuf.mapping.ptr.as_ptr().cast(), 0xAB, shmbuf.size);
+        }
+        assert!(read_via_fd(&shmbuf).iter().all(|&b| b == 0xAB));
+
+        clear_shmbuf(&shmbuf);
+        assert!(read_via_fd(&shmbuf).iter().all(|&b| b == 0));
+    }
 }
