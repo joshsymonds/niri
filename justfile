@@ -31,7 +31,13 @@ integration-check:
     int_delta=$(mktemp); pat_delta=$(mktemp)
     trap 'rm -f "$int_delta" "$pat_delta"' EXIT
     git fetch origin --quiet
-    prev=origin/josh/integration
+    # Baseline = the main commit this integration is built on (merge-base, not
+    # origin/josh/integration): comparing against the last pushed integration
+    # false-positives on every upstream `merge main` sync, since upstream files
+    # legitimately enter the delta. Against merge-base(main, HEAD), the full
+    # integration delta must always be patch content only — same guarantee,
+    # sync-proof, and validates the whole branch rather than the increment.
+    prev=$(git merge-base main HEAD)
     # tooling files legitimately diverge from prev; exclude them.
     git diff --name-only "$prev" HEAD -- \
         ':!CLAUDE.md' ':!justfile' ':!INTEGRATION.md' ':!.envrc' ':!.gitignore' \
