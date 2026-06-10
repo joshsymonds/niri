@@ -555,30 +555,38 @@ impl Niri {
         // Drop the borrow so `with_windows_mut` can re-borrow Niri internals.
         drop(config);
 
+        let mut changed = false;
+
         if !enabled || !cast_active {
             self.layout.with_windows_mut(|mapped, _| {
-                mapped.set_block_out_for_screencast_auto(false);
+                changed |= mapped.set_block_out_for_screencast_auto(false);
             });
-            return;
+        } else {
+            let active_window_ids: HashSet<u64> = self.casting.active_casts.windows.clone();
+            self.layout.with_windows_mut(|mapped, _| {
+                let id = mapped.id().get();
+                if active_window_ids.contains(&id) {
+                    // This window IS being cast — never hide it from its own cast.
+                    changed |= mapped.set_block_out_for_screencast_auto(false);
+                    return;
+                }
+                // Run the predicate inside the toplevel-role closure so we avoid
+                // cloning the app_id String on the State::refresh hot path. The
+                // closure runs under the XdgToplevelSurfaceData mutex; the
+                // predicate is a cheap `matches!` on a &str borrow.
+                let is_zoom = crate::utils::with_toplevel_role(mapped.toplevel(), |role| {
+                    role.app_id.as_deref().is_some_and(is_zoom_app_id)
+                });
+                changed |= mapped.set_block_out_for_screencast_auto(is_zoom);
+            });
         }
 
-        let active_window_ids: HashSet<u64> = self.casting.active_casts.windows.clone();
-        self.layout.with_windows_mut(|mapped, _| {
-            let id = mapped.id().get();
-            if active_window_ids.contains(&id) {
-                // This window IS being cast — never hide it from its own cast.
-                mapped.set_block_out_for_screencast_auto(false);
-                return;
-            }
-            // Run the predicate inside the toplevel-role closure so we avoid
-            // cloning the app_id String on the State::refresh hot path. The
-            // closure runs under the XdgToplevelSurfaceData mutex; the
-            // predicate is a cheap `matches!` on a &str borrow.
-            let is_zoom = crate::utils::with_toplevel_role(mapped.toplevel(), |role| {
-                role.app_id.as_deref().is_some_and(is_zoom_app_id)
-            });
-            mapped.set_block_out_for_screencast_auto(is_zoom);
-        });
+        // A flag flip changes cast renders without damaging anything on its own; queue a
+        // redraw so active casts pick up the new exclusion state instead of keeping a stale
+        // frame until the next damage.
+        if changed {
+            self.queue_redraw_all();
+        }
     }
 
     pub fn refresh_mapped_cast_outputs(&mut self) {

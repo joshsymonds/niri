@@ -416,8 +416,11 @@ impl Mapped {
         self.need_to_recompute_rules = true;
     }
 
-    pub fn set_block_out_for_screencast_auto(&mut self, value: bool) {
+    /// Sets the Zoom auto-hide flag, returning whether the value changed.
+    pub fn set_block_out_for_screencast_auto(&mut self, value: bool) -> bool {
+        let changed = self.block_out_for_screencast_auto != value;
         self.block_out_for_screencast_auto = value;
+        changed
     }
 
     /// Whether this window should be blocked out for the given render target.
@@ -681,6 +684,10 @@ impl LayoutElement for Mapped {
         push: &mut dyn FnMut(LayoutElementRenderElement<R>),
     ) {
         if self.should_block_out(ctx.target) {
+            // Note: cast-excluded windows normally never reach this — Tile::render returns
+            // early. This block-out remains the fallback for render paths that don't go
+            // through a tile (thumbnails, snapshots), where a black placeholder beats a
+            // content leak or a layout hole.
             let mut buffer = self.block_out_buffer.borrow_mut();
             buffer.resize(self.window.geometry().size.to_f64());
             let elem =
@@ -700,6 +707,10 @@ impl LayoutElement for Mapped {
                 &mut push,
             )
         }
+    }
+
+    fn exclude_from_cast(&self, target: crate::render_helpers::RenderTarget) -> bool {
+        compute_exclude_from_cast(target, self.block_out_for_screencast_auto)
     }
 
     fn render_popups<R: NiriRenderer>(
@@ -1467,19 +1478,24 @@ fn compute_should_block_out(
     block_out_from: Option<niri_config::BlockOutFrom>,
     block_out_for_screencast_auto: bool,
 ) -> bool {
+    target.should_block_out(block_out_from)
+        || compute_exclude_from_cast(target, block_out_for_screencast_auto)
+}
+
+/// Pure helper backing [`Mapped::exclude_from_cast`](LayoutElement::exclude_from_cast).
+///
+/// Unlike block-out, exclusion omits the window's entire tile from cast renders so the
+/// content underneath shows through, rather than painting an opaque black rectangle.
+fn compute_exclude_from_cast(
+    target: crate::render_helpers::RenderTarget,
+    block_out_for_screencast_auto: bool,
+) -> bool {
     use crate::render_helpers::RenderTarget;
-    if target.should_block_out(block_out_from) {
-        return true;
-    }
-    if block_out_for_screencast_auto
+    block_out_for_screencast_auto
         && matches!(
             target,
             RenderTarget::Screencast | RenderTarget::ScreenCapture
         )
-    {
-        return true;
-    }
-    false
 }
 
 #[cfg(test)]
@@ -1536,6 +1552,24 @@ mod should_block_out_tests {
             Some(BlockOutFrom::Screencast),
             false
         ));
+    }
+
+    #[test]
+    fn exclude_from_cast_requires_auto_flag() {
+        for target in [
+            RenderTarget::Output,
+            RenderTarget::Screencast,
+            RenderTarget::ScreenCapture,
+        ] {
+            assert!(!compute_exclude_from_cast(target, false));
+        }
+    }
+
+    #[test]
+    fn exclude_from_cast_omits_cast_targets_only() {
+        assert!(compute_exclude_from_cast(RenderTarget::Screencast, true));
+        assert!(compute_exclude_from_cast(RenderTarget::ScreenCapture, true));
+        assert!(!compute_exclude_from_cast(RenderTarget::Output, true));
     }
 
     #[test]
