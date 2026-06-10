@@ -9,7 +9,7 @@ use std::rc::Rc;
 use std::time::Duration;
 use std::{mem, ptr, slice};
 
-use anyhow::{ensure, Context as _};
+use anyhow::Context as _;
 use calloop::timer::{TimeoutAction, Timer};
 use calloop::RegistrationToken;
 use pipewire::context::ContextRc;
@@ -39,7 +39,7 @@ use smithay::backend::drm::DrmDeviceFd;
 use smithay::backend::renderer::damage::OutputDamageTracker;
 use smithay::backend::renderer::element::utils::{Relocate, RelocateRenderElement};
 use smithay::backend::renderer::element::{Element, RenderElement};
-use smithay::backend::renderer::gles::GlesRenderer;
+use smithay::backend::renderer::gles::{GlesMapping, GlesRenderer};
 use smithay::backend::renderer::sync::SyncPoint;
 use smithay::backend::renderer::ExportMem;
 use smithay::output::{Output, OutputModeSource};
@@ -53,7 +53,8 @@ use zbus::object_server::SignalEmitter;
 use crate::dbus::mutter_screen_cast::{self, CursorMode};
 use crate::niri::{CastTarget, State};
 use crate::render_helpers::{
-    clear_dmabuf, encompassing_geo, render_and_download, render_to_dmabuf,
+    clear_dmabuf, encompassing_geo, render_and_download, render_and_start_download,
+    render_to_dmabuf,
 };
 use crate::screencasting::CastRenderElement;
 use crate::utils::{get_monotonic_time, CastSessionId, CastStreamId};
@@ -123,6 +124,22 @@ struct CastInner {
     /// stored in order from oldest to newest, and the same ordering should be preserved when
     /// submitting completed buffers to PipeWire.
     rendering_buffers: Vec<(NonNull<pw_buffer>, SyncPoint)>,
+    /// SHM buffers dequeued from PipeWire whose GPU readback hasn't completed yet.
+    ///
+    /// Same ordering contract as `rendering_buffers`: oldest to newest, queued to PipeWire in
+    /// order once their fences signal and the pixels are copied over.
+    pending_shm_frames: Vec<PendingShmFrame>,
+}
+
+/// An SHM cast frame waiting for its GPU-to-PBO readback to finish.
+#[derive(Debug)]
+struct PendingShmFrame {
+    pw_buffer: NonNull<pw_buffer>,
+    /// Fence inserted after the readback command.
+    sync: SyncPoint,
+    shmbuf: Shmbuf,
+    /// The pending PBO download; mapping it blocks until `sync` is reached.
+    mapping: GlesMapping,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -470,6 +487,7 @@ impl PipeWire {
             dmabufs: HashMap::new(),
             shmbufs: HashMap::new(),
             rendering_buffers: Vec::new(),
+            pending_shm_frames: Vec::new(),
         }));
 
         let listener = stream
@@ -989,6 +1007,9 @@ impl PipeWire {
                     inner
                         .rendering_buffers
                         .retain(|(buf, _)| buf.as_ptr() != buffer);
+                    inner
+                        .pending_shm_frames
+                        .retain(|frame| frame.pw_buffer.as_ptr() != buffer);
 
                     unsafe {
                         let spa_buffer = (*buffer).buffer;
@@ -1293,6 +1314,114 @@ impl Cast {
         }
     }
 
+    /// Queues an SHM buffer to PipeWire once its GPU readback completes.
+    ///
+    /// The buffer is held in `pending_shm_frames` together with its PBO download; when the fence
+    /// fd signals, the download is mapped (no longer stalling on the GPU), copied into the SHM
+    /// buffer, and the buffer is queued — all from the event loop. Without an exportable fence we
+    /// complete synchronously right away, which blocks on the GPU like before this mechanism
+    /// existed, but cannot wedge the stream.
+    unsafe fn queue_shm_after_readback(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        pw_buffer: NonNull<pw_buffer>,
+        shmbuf: Shmbuf,
+        mapping: GlesMapping,
+        fence: Option<SyncPoint>,
+    ) {
+        let _span = tracy_client::span!("Cast::queue_shm_after_readback");
+
+        let sync_fd = fence.as_ref().and_then(|fence| fence.export());
+        let (sync, sync_fd) = match (fence, sync_fd) {
+            (Some(sync), Some(sync_fd)) => (sync, sync_fd),
+            _ => {
+                // No usable fence; complete synchronously (this blocks on the GPU).
+                self.inner
+                    .borrow_mut()
+                    .pending_shm_frames
+                    .push(PendingShmFrame {
+                        pw_buffer,
+                        sync: SyncPoint::signaled(),
+                        shmbuf,
+                        mapping,
+                    });
+                self.complete_shm_frames(renderer);
+                return;
+            }
+        };
+
+        self.inner
+            .borrow_mut()
+            .pending_shm_frames
+            .push(PendingShmFrame {
+                pw_buffer,
+                sync,
+                shmbuf,
+                mapping,
+            });
+
+        trace!("scheduling shm buffer to complete after readback");
+        let stream_id = self.stream_id;
+        let source = Generic::new(sync_fd, Interest::READ, Mode::OneShot);
+        self.event_loop
+            .insert_source(source, move |_, _, state| {
+                state.backend.with_primary_renderer(|renderer| {
+                    for cast in &mut state.niri.casting.casts {
+                        if cast.stream_id == stream_id {
+                            cast.complete_shm_frames(renderer);
+                        }
+                    }
+                });
+
+                Ok(PostAction::Remove)
+            })
+            .unwrap();
+    }
+
+    /// Copies completed SHM readbacks into their buffers and queues them to PipeWire.
+    ///
+    /// Like [`Self::queue_completed_buffers`], only the prefix of frames whose readback has
+    /// finished is queued, preserving frame order.
+    fn complete_shm_frames(&mut self, renderer: &mut GlesRenderer) {
+        let _span = tracy_client::span!("Cast::complete_shm_frames");
+
+        let mut inner = self.inner.borrow_mut();
+
+        let first_in_progress_idx = inner
+            .pending_shm_frames
+            .iter()
+            .position(|frame| !frame.sync.is_reached())
+            .unwrap_or(inner.pending_shm_frames.len());
+
+        for frame in inner.pending_shm_frames.drain(..first_in_progress_idx) {
+            let bytes = match renderer.map_texture(&frame.mapping) {
+                Ok(bytes) => bytes,
+                Err(err) => {
+                    warn!("error mapping shm cast readback: {err:?}");
+                    unsafe { return_unused_buffer(&self.stream, frame.pw_buffer) };
+                    continue;
+                }
+            };
+
+            if bytes.len() != frame.shmbuf.size {
+                // Only possible if the stream got renegotiated under us.
+                warn!("shm cast readback size mismatch, dropping frame");
+                unsafe { return_unused_buffer(&self.stream, frame.pw_buffer) };
+                continue;
+            }
+
+            trace!("queueing shm buffer after readback");
+            unsafe {
+                ptr::copy_nonoverlapping(
+                    bytes.as_ptr(),
+                    frame.shmbuf.mapping.ptr.as_ptr().cast(),
+                    frame.shmbuf.size,
+                );
+                pw_stream_queue_buffer(self.stream.as_raw_ptr(), frame.pw_buffer.as_ptr());
+            }
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn dequeue_buffer_and_render(
         &mut self,
@@ -1428,23 +1557,31 @@ impl Cast {
                             Fourcc::Xrgb8888
                         };
 
-                        match render_to_shmbuf(
-                            renderer,
-                            &shmbuf,
-                            size,
-                            scale,
-                            Transform::Normal,
-                            fourcc,
-                            elements.iter().rev(),
-                        ) {
-                            Ok(()) => {
+                        let expected_size = size.w as usize * size.h as usize * SHM_BYTES_PER_PIXEL;
+                        let res = if shmbuf.size == expected_size {
+                            render_and_start_download(
+                                renderer,
+                                size,
+                                scale,
+                                Transform::Normal,
+                                fourcc,
+                                elements.iter().rev(),
+                            )
+                        } else {
+                            Err(anyhow::anyhow!("invalid buffer size"))
+                        };
+
+                        match res {
+                            Ok((mapping, fence)) => {
                                 mark_buffer_after_render(
                                     pw_buffer,
                                     &mut self.sequence_counter,
                                     SharingBuf::Shm(&shmbuf),
                                 );
                                 trace!("queueing buffer with seq={}", self.sequence_counter);
-                                self.queue_after_sync(pw_buffer, SyncPoint::signaled());
+                                self.queue_shm_after_readback(
+                                    renderer, pw_buffer, shmbuf, mapping, fence,
+                                );
                                 true
                             }
                             Err(err) => {
@@ -1527,6 +1664,13 @@ impl Cast {
 
                 let fd = (*(*spa_buffer).datas).fd;
                 let shmbuf = self.inner.borrow().shmbufs[&fd].clone();
+
+                // Drop in-flight content frames: we're blanking the stream, and letting them
+                // queue after this clear frame would reorder it back to real contents.
+                let pending = mem::take(&mut self.inner.borrow_mut().pending_shm_frames);
+                for frame in pending {
+                    return_unused_buffer(&self.stream, frame.pw_buffer);
+                }
 
                 clear_shmbuf(&shmbuf);
                 mark_buffer_after_render(
@@ -1764,37 +1908,6 @@ unsafe fn mark_buffer_after_render(
 unsafe fn find_meta_header(buffer: *mut spa_buffer) -> Option<NonNull<spa_meta_header>> {
     let p = spa_buffer_find_meta_data(buffer, SPA_META_Header, size_of::<spa_meta_header>()).cast();
     NonNull::new(p)
-}
-
-fn render_to_shmbuf(
-    renderer: &mut GlesRenderer,
-    buffer: &Shmbuf,
-    size: Size<i32, Physical>,
-    scale: Scale<f64>,
-    transform: Transform,
-    fourcc: Fourcc,
-    elements: impl Iterator<Item = impl RenderElement<GlesRenderer>>,
-) -> anyhow::Result<()> {
-    let expected_size = size.w as usize * size.h as usize * SHM_BYTES_PER_PIXEL;
-    ensure!(buffer.size == expected_size, "invalid buffer size");
-    let mapping = render_and_download(renderer, size, scale, transform, fourcc, elements)?;
-    let bytes = renderer
-        .map_texture(&mapping)
-        .context("error mapping texture")?;
-
-    unsafe {
-        let buf = rustix::mm::mmap(
-            std::ptr::null_mut(),
-            buffer.size,
-            rustix::mm::ProtFlags::READ | rustix::mm::ProtFlags::WRITE,
-            rustix::mm::MapFlags::SHARED,
-            buffer.fd.clone(),
-            0,
-        )?;
-        ptr::copy_nonoverlapping(bytes.as_ptr(), buf.cast(), buffer.size);
-        rustix::mm::munmap(buf, buffer.size).unwrap();
-    }
-    Ok(())
 }
 
 unsafe fn add_invisible_cursor(spa_buffer: *mut spa_buffer) {
