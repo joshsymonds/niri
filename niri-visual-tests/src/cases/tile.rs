@@ -119,6 +119,7 @@ impl TestCase for Tile {
         self.tile.update_render_elements(
             true,
             Rectangle::new(Point::from((-location.x, -location.y)), size.to_logical(1.)),
+            None,
         );
 
         let mut rv = Vec::new();
