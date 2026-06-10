@@ -2176,12 +2176,14 @@ impl State {
 
         let mut windows = HashMap::new();
 
+        // Raw Wayland app IDs; the introspect D-Bus thread resolves them to desktop-file IDs
+        // before returning, keeping the .desktop scanning off the compositor thread.
         #[cfg(feature = "xdp-gnome-screencast")]
         windows.insert(
             self.niri.casting.dynamic_cast_id_for_portal.get(),
             gnome_shell_introspect::WindowProperties {
                 title: String::from("niri Dynamic Cast Target"),
-                app_id: String::from("rs.bxt.niri.desktop"),
+                app_id: String::from("rs.bxt.niri"),
             },
         );
 
@@ -2190,14 +2192,7 @@ impl State {
             let props = with_toplevel_role(mapped.toplevel(), |role| {
                 gnome_shell_introspect::WindowProperties {
                     title: role.title.clone().unwrap_or_default(),
-                    app_id: role
-                        .app_id
-                        .as_ref()
-                        // We don't do proper .desktop file tracking (it's quite involved), and
-                        // Wayland windows can set any app id they want. However, this seems to
-                        // work well enough in practice.
-                        .map(|app_id| format!("{app_id}.desktop"))
-                        .unwrap_or_default(),
+                    app_id: role.app_id.clone().unwrap_or_default(),
                 }
             });
 
