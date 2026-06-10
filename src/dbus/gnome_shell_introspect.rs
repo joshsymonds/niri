@@ -51,8 +51,7 @@ impl Introspect {
         }
     }
 
-    // FIXME: call this upon window changes, once more of the infrastructure is there (will be
-    // needed for the event stream IPC anyway).
+    /// Emitted by `Niri::refresh_introspect_windows` when the window list changes.
     #[zbus(signal)]
     pub async fn windows_changed(ctxt: &SignalEmitter<'_>) -> zbus::Result<()>;
 }
@@ -78,5 +77,62 @@ impl Start for Introspect {
         conn.request_name_with_flags("org.gnome.Shell.Introspect", flags)?;
 
         Ok(conn)
+    }
+}
+
+/// Order-independent signature of the window list as exposed over Introspect.
+///
+/// XOR-folds a per-window hash of (id, title, app-id), so reordering windows yields the same
+/// signature while any open/close/retitle/re-app-id changes it. Used to decide when to emit
+/// [`Introspect::windows_changed`].
+pub fn windows_signature<'a>(windows: impl Iterator<Item = (u64, &'a str, &'a str)>) -> u64 {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+
+    windows.fold(0, |acc, (id, title, app_id)| {
+        let mut hasher = DefaultHasher::new();
+        id.hash(&mut hasher);
+        title.hash(&mut hasher);
+        app_id.hash(&mut hasher);
+        acc ^ hasher.finish()
+    })
+}
+
+#[cfg(test)]
+mod signature_tests {
+    use super::*;
+
+    const A: (u64, &str, &str) = (1, "Terminal — ~", "kitty");
+    const B: (u64, &str, &str) = (2, "Meeting", "Zoom");
+    const C: (u64, &str, &str) = (3, "inbox", "thunderbird");
+
+    #[test]
+    fn order_independent() {
+        let fwd = windows_signature([A, B, C].into_iter());
+        let rev = windows_signature([C, B, A].into_iter());
+        assert_eq!(fwd, rev);
+    }
+
+    #[test]
+    fn add_remove_retitle_change_signature() {
+        let base = windows_signature([A, B].into_iter());
+
+        let added = windows_signature([A, B, C].into_iter());
+        assert_ne!(base, added);
+
+        let removed = windows_signature([A].into_iter());
+        assert_ne!(base, removed);
+
+        let retitled = windows_signature([A, (2, "Meeting — sharing", "Zoom")].into_iter());
+        assert_ne!(base, retitled);
+
+        let new_app_id = windows_signature([A, (2, "Meeting", "zoom")].into_iter());
+        assert_ne!(base, new_app_id);
+    }
+
+    #[test]
+    fn empty_is_stable() {
+        let a = windows_signature(std::iter::empty());
+        let b = windows_signature(std::iter::empty());
+        assert_eq!(a, b);
     }
 }
