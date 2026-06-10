@@ -4,11 +4,12 @@ use anyhow::{ensure, Context as _};
 use niri_config::BlockOutFrom;
 use smithay::backend::allocator::dmabuf::Dmabuf;
 use smithay::backend::allocator::{Buffer, Fourcc};
+use smithay::backend::egl::fence::EGLFence;
 use smithay::backend::renderer::damage::OutputDamageTracker;
 use smithay::backend::renderer::element::utils::{Relocate, RelocateRenderElement};
 use smithay::backend::renderer::element::{Element, Kind, RenderElement, RenderElementStates};
 use smithay::backend::renderer::gles::{
-    GlesError, GlesMapping, GlesRenderer, GlesTarget, GlesTexture,
+    Capability, GlesError, GlesMapping, GlesRenderer, GlesTarget, GlesTexture,
 };
 use smithay::backend::renderer::sync::SyncPoint;
 use smithay::backend::renderer::{
@@ -251,6 +252,48 @@ pub fn render_and_download(
         .context("error rendering")?;
 
     copy_framebuffer(renderer, &target, fourcc).context("error copying framebuffer")
+}
+
+/// Like [`render_and_download`], but does not wait for the GPU-to-CPU download to finish.
+///
+/// `copy_framebuffer` only issues an asynchronous `glReadPixels` into a PBO; the stall happens
+/// when the mapping is mapped. This returns the pending mapping together with a fence inserted
+/// after the readback command: once the fence signals, `map_texture` no longer blocks.
+///
+/// A `None` fence means the renderer can't export fences (or creating one failed); the caller
+/// must then treat mapping the texture as a blocking operation, like [`render_and_download`].
+pub fn render_and_start_download(
+    renderer: &mut GlesRenderer,
+    size: Size<i32, Physical>,
+    scale: Scale<f64>,
+    transform: Transform,
+    fourcc: Fourcc,
+    elements: impl Iterator<Item = impl RenderElement<GlesRenderer>>,
+) -> anyhow::Result<(GlesMapping, Option<SyncPoint>)> {
+    let _span = tracy_client::span!();
+
+    let mut texture = create_texture(renderer, size, fourcc).context("error creating texture")?;
+    let mut target = renderer
+        .bind(&mut texture)
+        .context("error binding texture")?;
+
+    let _sync = render_elements(renderer, &mut target, size, scale, transform, elements)
+        .context("error rendering")?;
+
+    let mapping =
+        copy_framebuffer(renderer, &target, fourcc).context("error copying framebuffer")?;
+    Ok((mapping, readback_fence(renderer)))
+}
+
+/// Creates a fence covering all GL commands issued so far, including pending readbacks.
+fn readback_fence(renderer: &mut GlesRenderer) -> Option<SyncPoint> {
+    if !renderer.capabilities().contains(&Capability::ExportFence) {
+        return None;
+    }
+    let fence = EGLFence::create(renderer.egl_context().display()).ok()?;
+    // Native fences require a flush to reach the GPU; mirrors smithay's export_sync_point.
+    let _ = renderer.with_context(|gl| unsafe { gl.Flush() });
+    Some(SyncPoint::from(fence))
 }
 
 pub fn render_to_vec(
