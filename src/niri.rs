@@ -400,6 +400,10 @@ pub struct Niri {
 
     #[cfg(feature = "dbus")]
     pub dbus: Option<crate::dbus::DBusServers>,
+    /// Last signature of the window list as exposed over org.gnome.Shell.Introspect, used to
+    /// emit `WindowsChanged` on transitions.
+    #[cfg(feature = "dbus")]
+    introspect_windows_signature: Option<u64>,
     #[cfg(feature = "dbus")]
     pub a11y_keyboard_monitor: Option<crate::dbus::freedesktop_a11y::KeyboardMonitor>,
     #[cfg(feature = "dbus")]
@@ -828,6 +832,8 @@ impl State {
         #[cfg(feature = "xdp-gnome-screencast")]
         self.niri.refresh_screencast_auto_hide();
         self.ipc_refresh_casts();
+        #[cfg(feature = "dbus")]
+        self.niri.refresh_introspect_windows();
 
         self.niri.refresh_window_rules();
         self.refresh_ipc_outputs();
@@ -2187,12 +2193,14 @@ impl State {
 
         let mut windows = HashMap::new();
 
+        // Raw Wayland app IDs; the introspect D-Bus thread resolves them to desktop-file IDs
+        // before returning, keeping the .desktop scanning off the compositor thread.
         #[cfg(feature = "xdp-gnome-screencast")]
         windows.insert(
             self.niri.casting.dynamic_cast_id_for_portal.get(),
             gnome_shell_introspect::WindowProperties {
                 title: String::from("niri Dynamic Cast Target"),
-                app_id: String::from("rs.bxt.niri.desktop"),
+                app_id: String::from("rs.bxt.niri"),
             },
         );
 
@@ -2201,14 +2209,7 @@ impl State {
             let props = with_toplevel_role(mapped.toplevel(), |role| {
                 gnome_shell_introspect::WindowProperties {
                     title: role.title.clone().unwrap_or_default(),
-                    app_id: role
-                        .app_id
-                        .as_ref()
-                        // We don't do proper .desktop file tracking (it's quite involved), and
-                        // Wayland windows can set any app id they want. However, this seems to
-                        // work well enough in practice.
-                        .map(|app_id| format!("{app_id}.desktop"))
-                        .unwrap_or_default(),
+                    app_id: role.app_id.clone().unwrap_or_default(),
                 }
             });
 
@@ -2639,6 +2640,8 @@ impl Niri {
 
             #[cfg(feature = "dbus")]
             dbus: None,
+            #[cfg(feature = "dbus")]
+            introspect_windows_signature: None,
             #[cfg(feature = "dbus")]
             a11y_keyboard_monitor: None,
             #[cfg(feature = "dbus")]
@@ -3681,6 +3684,55 @@ impl Niri {
 
         let state = self.output_state.get(output)?;
         state.lock_surface.as_ref().map(|s| s.wl_surface()).cloned()
+    }
+
+    /// Emits `org.gnome.Shell.Introspect.WindowsChanged` when the window list changes.
+    ///
+    /// Computes an order-independent signature of (id, title, app-id) over all mapped windows
+    /// and emits the signal on transitions, letting the xdg-desktop-portal window picker
+    /// refresh its list live. Runs every `State::refresh`.
+    #[cfg(feature = "dbus")]
+    pub fn refresh_introspect_windows(&mut self) {
+        use crate::dbus::gnome_shell_introspect::windows_signature;
+        use crate::utils::with_toplevel_role;
+
+        let mut signature = 0u64;
+        self.layout.with_windows(|mapped, _, _, _| {
+            let id = mapped.id().get();
+            signature ^= with_toplevel_role(mapped.toplevel(), |role| {
+                windows_signature(std::iter::once((
+                    id,
+                    role.title.as_deref().unwrap_or_default(),
+                    role.app_id.as_deref().unwrap_or_default(),
+                )))
+            });
+        });
+
+        let prev = self.introspect_windows_signature.replace(signature);
+        if let Some(prev) = prev {
+            if prev != signature {
+                self.notify_introspect_windows_changed();
+            }
+        }
+    }
+
+    #[cfg(feature = "dbus")]
+    fn notify_introspect_windows_changed(&self) {
+        use crate::dbus::gnome_shell_introspect::Introspect;
+
+        let _span = tracy_client::span!("Niri::notify_introspect_windows_changed");
+
+        let Some(dbus) = &self.dbus else { return };
+        let Some(conn) = &dbus.conn_introspect else {
+            return;
+        };
+        let server = conn.object_server();
+        let Ok(iface) = server.interface::<_, Introspect>("/org/gnome/Shell/Introspect") else {
+            return;
+        };
+        if let Err(err) = async_io::block_on(Introspect::windows_changed(iface.signal_emitter())) {
+            warn!("error emitting Introspect.WindowsChanged: {err:?}");
+        }
     }
 
     /// Schedules an immediate redraw on all outputs if one is not already scheduled.
