@@ -34,6 +34,7 @@ use smithay::backend::renderer::element::{
 };
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::renderer::sync::SyncPoint;
+use smithay::backend::renderer::utils::with_renderer_surface_state;
 use smithay::backend::renderer::Color32F;
 use smithay::desktop::utils::{
     bbox_from_surface_tree, output_update, send_dmabuf_feedback_surface_tree,
@@ -89,6 +90,7 @@ use smithay::wayland::keyboard_shortcuts_inhibit::{
 use smithay::wayland::output::OutputManagerState;
 use smithay::wayland::pointer_constraints::{with_pointer_constraint, PointerConstraintsState};
 use smithay::wayland::pointer_gestures::PointerGesturesState;
+use smithay::wayland::pointer_warp::PointerWarpManager;
 use smithay::wayland::presentation::PresentationState;
 use smithay::wayland::relative_pointer::RelativePointerManagerState;
 use smithay::wayland::security_context::SecurityContextState;
@@ -299,6 +301,7 @@ pub struct Niri {
     pub pointer_gestures_state: PointerGesturesState,
     pub relative_pointer_state: RelativePointerManagerState,
     pub pointer_constraints_state: PointerConstraintsState,
+    pub pointer_warp_state: PointerWarpManager,
     pub idle_notifier_state: IdleNotifierState<State>,
     pub idle_inhibit_manager_state: IdleInhibitManagerState,
     pub data_device_state: DataDeviceState,
@@ -892,6 +895,51 @@ impl State {
 
         // FIXME: granular
         self.niri.queue_redraw_all();
+    }
+
+    /// Warps the pointer to a position relative to `surface`, in response to a
+    /// `wp_pointer_warp_v1` request. Returns whether the pointer was warped.
+    ///
+    /// The request is honored only when `surface` holds pointer focus (the
+    /// security boundary: a client cannot warp the pointer unless it owns it)
+    /// and the requested position lies within the surface.
+    pub fn warp_pointer_to(&mut self, surface: &WlSurface, pos: Point<f64, Logical>) -> bool {
+        let pointer = self.niri.seat.get_pointer().unwrap();
+
+        // A client may only warp the pointer while the target surface holds
+        // pointer focus, including under an implicit grab.
+        if pointer.current_focus().as_ref() != Some(surface) {
+            return false;
+        }
+
+        // The surface's origin in the global space comes from pointer_contents
+        // (the surface under the pointer); require it to be the warp target —
+        // the same approach `cursor_position_hint` uses to recover the origin.
+        let Some((focused, origin)) = self
+            .niri
+            .pointer_contents
+            .surface
+            .as_ref()
+            .map(|(s, o)| (s.clone(), *o))
+        else {
+            return false;
+        };
+        if &focused != surface {
+            return false;
+        }
+
+        // Reject positions outside the surface (per the wp_pointer_warp_v1 spec).
+        let Some(size) =
+            with_renderer_surface_state(surface, |state| state.surface_size()).flatten()
+        else {
+            return false;
+        };
+        if pos.x < 0.0 || pos.y < 0.0 || pos.x > f64::from(size.w) || pos.y > f64::from(size.h) {
+            return false;
+        }
+
+        self.move_cursor(origin + pos);
+        true
     }
 
     /// Moves cursor within the specified rectangle, only adjusting coordinates if needed.
@@ -2338,6 +2386,7 @@ impl Niri {
         let pointer_gestures_state = PointerGesturesState::new::<State>(&display_handle);
         let relative_pointer_state = RelativePointerManagerState::new::<State>(&display_handle);
         let pointer_constraints_state = PointerConstraintsState::new::<State>(&display_handle);
+        let pointer_warp_state = PointerWarpManager::new::<State>(&display_handle);
         let idle_notifier_state = IdleNotifierState::new(&display_handle, event_loop.clone());
         let idle_inhibit_manager_state = IdleInhibitManagerState::new::<State>(&display_handle);
         let data_device_state = DataDeviceState::new::<State>(&display_handle);
@@ -2583,6 +2632,7 @@ impl Niri {
             pointer_gestures_state,
             relative_pointer_state,
             pointer_constraints_state,
+            pointer_warp_state,
             idle_notifier_state,
             idle_inhibit_manager_state,
             data_device_state,
