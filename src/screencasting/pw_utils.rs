@@ -1634,7 +1634,7 @@ fn allocate_buffer(
     }
 }
 
-fn allocate_dmabuf(
+pub(super) fn allocate_dmabuf(
     gbm: &GbmDevice<DrmDeviceFd>,
     size: Size<u32, Physical>,
     fourcc: Fourcc,

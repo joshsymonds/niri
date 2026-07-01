@@ -7,9 +7,11 @@ use anyhow::Context as _;
 use calloop::LoopHandle;
 use smithay::backend::allocator::format::FormatSet;
 use smithay::backend::allocator::gbm::GbmDevice;
+use smithay::backend::allocator::Fourcc;
 use smithay::backend::drm::DrmDeviceFd;
 use smithay::backend::renderer::element::utils::{Relocate, RelocateRenderElement};
 use smithay::backend::renderer::gles::GlesRenderer;
+use smithay::backend::renderer::Bind;
 use smithay::desktop::Window;
 use smithay::output::Output;
 use smithay::reexports::gbm::Modifier;
@@ -24,7 +26,7 @@ use crate::utils::{get_monotonic_time, CastSessionId, CastStreamId};
 use crate::window::mapped::{MappedId, WindowCastRenderElements};
 
 mod pw_utils;
-use pw_utils::{Cast, CastSizeChange, CursorData, PipeWire, PwToNiri};
+use pw_utils::{allocate_dmabuf, Cast, CastSizeChange, CursorData, PipeWire, PwToNiri};
 
 pub struct Screencasting {
     pub casts: Vec<Cast>,
@@ -42,6 +44,12 @@ pub struct Screencasting {
 
     // Drop PipeWire last, and specifically after casts, to prevent a double-free (yay).
     pub pipewire: Option<PipeWire>,
+
+    /// Cached result of probing whether the primary renderer can bind an implicit-modifier
+    /// (`Modifier::Invalid`) GBM dmabuf as a render target.
+    ///
+    /// `None` until the probe has run once; probed at most once per compositor run.
+    implicit_modifier_renderable: Option<bool>,
 }
 
 /// A screencast request that hasn't been started yet.
@@ -72,6 +80,7 @@ impl Screencasting {
             mapped_cast_output: HashMap::new(),
             dynamic_cast_id_for_portal: MappedId::next(),
             pipewire: None,
+            implicit_modifier_renderable: None,
         }
     }
 }
@@ -93,22 +102,49 @@ impl State {
             self.niri.casting.pipewire = Some(pw);
         }
 
-        let mut render_formats = self
+        let cached_probe = self.niri.casting.implicit_modifier_renderable;
+        let (mut render_formats, probe_result) = self
             .backend
             .with_primary_renderer(|renderer| {
-                renderer.egl_context().dmabuf_render_formats().clone()
+                let formats = renderer.egl_context().dmabuf_render_formats().clone();
+
+                // Probe at most once per compositor run, and only if there's actually an
+                // implicit-modifier entry that might need stripping.
+                let probe_result = cached_probe.or_else(|| {
+                    formats
+                        .iter()
+                        .any(|f| f.modifier == Modifier::Invalid)
+                        .then(|| probe_implicit_modifier_renderable(renderer, &gbm))
+                });
+
+                (formats, probe_result)
             })
             .unwrap_or_default();
 
-        {
-            let config = self.niri.config.borrow();
-            if config.debug.force_pipewire_invalid_modifier {
-                render_formats = render_formats
-                    .into_iter()
-                    .filter(|f| f.modifier == Modifier::Invalid)
-                    .collect();
+        if let Some(result) = probe_result {
+            if cached_probe.is_none() {
+                debug!("implicit modifier dmabuf renderable: {result}");
             }
+            self.niri.casting.implicit_modifier_renderable = Some(result);
         }
+
+        let force_invalid_modifier = {
+            let config = self.niri.config.borrow();
+            config.debug.force_pipewire_invalid_modifier
+        };
+
+        if force_invalid_modifier {
+            render_formats = render_formats
+                .into_iter()
+                .filter(|f| f.modifier == Modifier::Invalid)
+                .collect();
+        }
+
+        render_formats = strip_unsupported_implicit_modifier(
+            render_formats,
+            probe_result,
+            force_invalid_modifier,
+        );
 
         Ok((gbm, render_formats))
     }
@@ -792,6 +828,131 @@ fn cast_params_for_output(output: &Output) -> (Size<i32, Physical>, u32) {
     let size = transform.transform_size(mode.size);
     let refresh = mode.refresh as u32;
     (size, refresh)
+}
+
+/// Probes whether the primary renderer can bind an implicit-modifier (`Modifier::Invalid`) GBM
+/// dmabuf as a render target.
+///
+/// Some drivers (e.g. NVIDIA) advertise the implicit modifier in `dmabuf_render_formats()`, but
+/// fail to bind an implicit-modifier dmabuf for rendering. Any failure along the way is treated
+/// conservatively as "not renderable".
+fn probe_implicit_modifier_renderable(
+    renderer: &mut GlesRenderer,
+    gbm: &GbmDevice<DrmDeviceFd>,
+) -> bool {
+    let size = Size::from((64, 64));
+    let mut dmabuf = match allocate_dmabuf(gbm, size, Fourcc::Argb8888, Modifier::Invalid) {
+        Ok(dmabuf) => dmabuf,
+        Err(_) => return false,
+    };
+
+    let renderable = renderer.bind(&mut dmabuf).is_ok();
+    renderable
+}
+
+/// Decides the screencast format set to offer based on whether the implicit modifier is known to
+/// be renderable.
+///
+/// `force_pipewire_invalid_modifier` is a debug flag that forces the implicit-modifier path for
+/// testing purposes; when set, it always wins and the formats are returned unchanged.
+fn strip_unsupported_implicit_modifier(
+    formats: FormatSet,
+    implicit_modifier_renderable: Option<bool>,
+    force_pipewire_invalid_modifier: bool,
+) -> FormatSet {
+    if force_pipewire_invalid_modifier || implicit_modifier_renderable != Some(false) {
+        return formats;
+    }
+
+    formats
+        .into_iter()
+        .filter(|f| f.modifier != Modifier::Invalid)
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use smithay::backend::allocator::Format;
+
+    use super::*;
+
+    fn format(code: Fourcc, modifier: Modifier) -> Format {
+        Format { code, modifier }
+    }
+
+    fn as_set(formats: &FormatSet) -> HashSet<Format> {
+        formats.iter().copied().collect()
+    }
+
+    #[test]
+    fn strip_removes_invalid_entries_when_probe_says_not_renderable() {
+        let formats: FormatSet = [
+            format(Fourcc::Argb8888, Modifier::Invalid),
+            format(Fourcc::Argb8888, Modifier::Linear),
+            format(Fourcc::Xrgb8888, Modifier::Invalid),
+        ]
+        .into_iter()
+        .collect();
+
+        let result = strip_unsupported_implicit_modifier(formats, Some(false), false);
+
+        let expected: HashSet<Format> = [format(Fourcc::Argb8888, Modifier::Linear)]
+            .into_iter()
+            .collect();
+        assert_eq!(as_set(&result), expected);
+    }
+
+    #[test]
+    fn strip_is_identity_when_probe_says_renderable() {
+        let formats: FormatSet = [
+            format(Fourcc::Argb8888, Modifier::Invalid),
+            format(Fourcc::Argb8888, Modifier::Linear),
+        ]
+        .into_iter()
+        .collect();
+
+        let result = strip_unsupported_implicit_modifier(formats.clone(), Some(true), false);
+
+        assert_eq!(as_set(&result), as_set(&formats));
+    }
+
+    #[test]
+    fn debug_flag_bypasses_strip_even_when_probe_says_not_renderable() {
+        let formats: FormatSet = [format(Fourcc::Argb8888, Modifier::Invalid)]
+            .into_iter()
+            .collect();
+
+        let result = strip_unsupported_implicit_modifier(formats.clone(), Some(false), true);
+
+        assert_eq!(as_set(&result), as_set(&formats));
+    }
+
+    #[test]
+    fn strip_yields_empty_set_when_all_entries_are_invalid() {
+        let formats: FormatSet = [
+            format(Fourcc::Argb8888, Modifier::Invalid),
+            format(Fourcc::Xrgb8888, Modifier::Invalid),
+        ]
+        .into_iter()
+        .collect();
+
+        let result = strip_unsupported_implicit_modifier(formats, Some(false), false);
+
+        assert_eq!(result.iter().count(), 0);
+    }
+
+    #[test]
+    fn strip_is_identity_when_probe_has_not_run() {
+        let formats: FormatSet = [format(Fourcc::Argb8888, Modifier::Invalid)]
+            .into_iter()
+            .collect();
+
+        let result = strip_unsupported_implicit_modifier(formats.clone(), None, false);
+
+        assert_eq!(as_set(&result), as_set(&formats));
+    }
 }
 
 niri_render_elements! {
