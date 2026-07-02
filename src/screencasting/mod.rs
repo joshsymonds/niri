@@ -235,7 +235,7 @@ impl State {
                 }
             }
 
-            self.backend.with_primary_renderer(|renderer| {
+            let cast_failed = self.backend.with_primary_renderer(|renderer| {
                 let mut elements = Vec::new();
                 let mut pointer_location = Point::default();
 
@@ -269,16 +269,28 @@ impl State {
                 let cursor_data =
                     CursorData::compute(&elements, main_start, pointer_location, scale);
 
-                if cast.dequeue_buffer_and_render(
+                match cast.dequeue_buffer_and_render(
                     renderer,
                     &elements,
                     &cursor_data,
                     bbox.size,
                     scale,
                 ) {
-                    cast.last_frame_time = get_monotonic_time();
+                    Ok(true) => {
+                        cast.last_frame_time = get_monotonic_time();
+                        false
+                    }
+                    Ok(false) => false,
+                    Err(err) => {
+                        warn!("error rendering cast, stopping screencast: {err:?}");
+                        true
+                    }
                 }
             });
+
+            if cast_failed == Some(true) {
+                stop = true;
+            }
 
             break;
         }
@@ -647,8 +659,13 @@ impl Niri {
             }
             let cursor_data = cursor_data.as_ref().unwrap();
 
-            if cast.dequeue_buffer_and_render(renderer, &elements, cursor_data, size, scale) {
-                cast.last_frame_time = target_presentation_time;
+            match cast.dequeue_buffer_and_render(renderer, &elements, cursor_data, size, scale) {
+                Ok(true) => cast.last_frame_time = target_presentation_time,
+                Ok(false) => (),
+                Err(err) => {
+                    warn!("error rendering cast, stopping screencast: {err:?}");
+                    casts_to_stop.push(cast.session_id);
+                }
             }
         }
         self.casting.casts = casts;
@@ -732,8 +749,19 @@ impl Niri {
 
             let cursor_data = CursorData::compute(&elements, main_start, pointer_location, scale);
 
-            if cast.dequeue_buffer_and_render(renderer, &elements, &cursor_data, bbox.size, scale) {
-                cast.last_frame_time = target_presentation_time;
+            match cast.dequeue_buffer_and_render(
+                renderer,
+                &elements,
+                &cursor_data,
+                bbox.size,
+                scale,
+            ) {
+                Ok(true) => cast.last_frame_time = target_presentation_time,
+                Ok(false) => (),
+                Err(err) => {
+                    warn!("error rendering cast, stopping screencast: {err:?}");
+                    casts_to_stop.push(cast.session_id);
+                }
             }
         }
         self.casting.casts = casts;

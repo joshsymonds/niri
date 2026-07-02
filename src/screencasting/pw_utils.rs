@@ -123,6 +123,13 @@ struct CastInner {
     /// stored in order from oldest to newest, and the same ordering should be preserved when
     /// submitting completed buffers to PipeWire.
     rendering_buffers: Vec<(NonNull<pw_buffer>, SyncPoint)>,
+    /// Whether this cast has already renegotiated from DMA-BUF to SHM sharing because a
+    /// DMA-BUF-path render failed.
+    ///
+    /// The renegotiation is attempted once per cast lifetime. If a DMA-BUF-path render fails
+    /// again afterwards, the cast is stopped instead of renegotiated again, so a client that
+    /// never accepts the SHM offer can't cause an infinite stream of render-failure warnings.
+    shm_fallback_attempted: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -398,6 +405,25 @@ fn filter_unbindable_modifiers(
     }
 }
 
+/// Re-offers the stream with a modifier-less (SHM-only) format for the given video format, size,
+/// and refresh rate.
+///
+/// Used to renegotiate a cast down to SHM sharing, either because none of the client's fixated
+/// modifiers can be bound by the primary renderer, or because a live DMA-BUF cast failed to
+/// render and is falling back to SHM as a last resort.
+fn renegotiate_to_shm(
+    stream: &Stream,
+    video_format: VideoFormat,
+    size: Size<u32, Physical>,
+    refresh: u32,
+) -> Result<(), pipewire::Error> {
+    let o = make_video_params(&[video_format], &[], size, refresh, false);
+    let mut b = Vec::new();
+    let pod = make_pod(&mut b, o);
+    let mut params = vec![pod];
+    stream.update_params(&mut params)
+}
+
 impl PipeWire {
     pub fn new(
         event_loop: LoopHandle<'static, State>,
@@ -505,6 +531,7 @@ impl PipeWire {
             dmabufs: HashMap::new(),
             shmbufs: HashMap::new(),
             rendering_buffers: Vec::new(),
+            shm_fallback_attempted: false,
         }));
 
         let listener = stream
@@ -664,12 +691,9 @@ impl PipeWire {
                                          renegotiating to SHM"
                                     );
 
-                                    let o = make_video_params(&[format.format()], &[], format_size, refresh, false);
-                                    let mut b = Vec::new();
-                                    let pod = make_pod(&mut b, o);
-                                    let mut params = vec![pod];
-
-                                    if let Err(err) = stream.update_params(&mut params) {
+                                    if let Err(err) =
+                                        renegotiate_to_shm(stream, format.format(), format_size, refresh)
+                                    {
                                         warn!("error updating stream params: {err:?}");
                                         stop_cast();
                                     }
@@ -784,12 +808,12 @@ impl PipeWire {
                                                          renegotiating to SHM"
                                                     );
 
-                                                    let o = make_video_params(&[format.format()], &[], format_size, refresh, false);
-                                                    let mut b = Vec::new();
-                                                    let pod = make_pod(&mut b, o);
-                                                    let mut params = vec![pod];
-
-                                                    if let Err(err) = stream.update_params(&mut params) {
+                                                    if let Err(err) = renegotiate_to_shm(
+                                                        stream,
+                                                        format.format(),
+                                                        format_size,
+                                                        refresh,
+                                                    ) {
                                                         warn!("error updating stream params: {err:?}");
                                                         stop_cast();
                                                     }
@@ -1373,6 +1397,12 @@ impl Cast {
         }
     }
 
+    /// Dequeues a PipeWire buffer and renders into it.
+    ///
+    /// Returns `Ok(true)` if a frame was rendered, `Ok(false)` if the frame was skipped for a
+    /// non-fatal reason (no damage, no buffer available, or a DMA-BUF render failure that just
+    /// triggered an SHM fallback). Returns `Err` if the cast can no longer make progress and
+    /// should be stopped by the caller.
     #[allow(clippy::too_many_arguments)]
     pub fn dequeue_buffer_and_render(
         &mut self,
@@ -1381,7 +1411,7 @@ impl Cast {
         cursor_data: &CursorData<CastRenderElement<GlesRenderer>>,
         size: Size<i32, Physical>,
         scale: Scale<f64>,
-    ) -> bool {
+    ) -> anyhow::Result<bool> {
         let mut inner = self.inner.borrow_mut();
 
         if let CastState::Ready {
@@ -1435,14 +1465,14 @@ impl Cast {
 
             if damage.is_none() && !has_cursor_update {
                 trace!("no damage, skipping frame");
-                return false;
+                return Ok(false);
             }
             *last_cursor_location = Some(cursor_data.location);
             drop(inner);
 
             let Some(pw_buffer) = self.dequeue_available_buffer() else {
                 warn!("no available buffer in pw stream, skipping frame");
-                return false;
+                return Ok(false);
             };
             let buffer = pw_buffer.as_ptr();
 
@@ -1489,12 +1519,58 @@ impl Cast {
                                 );
                                 trace!("queueing buffer with seq={}", self.sequence_counter);
                                 self.queue_after_sync(pw_buffer, sync_point);
-                                true
+                                Ok(true)
                             }
                             Err(err) => {
                                 warn!("error rendering to dmabuf: {err:?}");
                                 return_unused_buffer(&self.stream, pw_buffer);
-                                false
+
+                                // We don't currently distinguish a bind failure from other
+                                // render failures here (anyhow's Error doesn't carry a
+                                // structured cause we can cheaply match on, and render_to_dmabuf
+                                // is shared with the clear-buffer path). Treating any DMA-BUF
+                                // render failure as grounds for an SHM fallback is still correct:
+                                // self-healing to SHM is strictly better than warning forever
+                                // (see the pathology this is meant to eliminate), and once the
+                                // fallback has been attempted once, we stop the cast rather than
+                                // loop.
+                                let mut inner = self.inner.borrow_mut();
+                                if inner.shm_fallback_attempted {
+                                    warn!(
+                                        "dmabuf render failed again after an SHM fallback was \
+                                         already attempted, stopping cast: {err:?}"
+                                    );
+                                    return Err(err);
+                                }
+                                inner.shm_fallback_attempted = true;
+
+                                warn!("dmabuf render failed, renegotiating cast to SHM: {err:?}");
+
+                                let video_format = if alpha {
+                                    VideoFormat::BGRA
+                                } else {
+                                    VideoFormat::BGRx
+                                };
+                                let format_size = Size::from((size.w as u32, size.h as u32));
+                                let refresh = inner.refresh;
+                                // Move out of Ready so no further dmabuf renders are attempted
+                                // while the client answers the re-offer (mirrors ensure_size).
+                                inner.state = CastState::ResizePending {
+                                    pending_size: format_size,
+                                };
+                                drop(inner);
+
+                                if let Err(update_err) = renegotiate_to_shm(
+                                    &self.stream,
+                                    video_format,
+                                    format_size,
+                                    refresh,
+                                ) {
+                                    warn!("error updating stream params: {update_err:?}");
+                                    return Err(update_err.into());
+                                }
+
+                                Ok(false)
                             }
                         }
                     }
@@ -1525,12 +1601,12 @@ impl Cast {
                                 );
                                 trace!("queueing buffer with seq={}", self.sequence_counter);
                                 self.queue_after_sync(pw_buffer, SyncPoint::signaled());
-                                true
+                                Ok(true)
                             }
                             Err(err) => {
                                 warn!("error rendering to shmbuf: {err:?}");
                                 return_unused_buffer(&self.stream, pw_buffer);
-                                false
+                                Ok(false)
                             }
                         }
                     }
@@ -1538,7 +1614,7 @@ impl Cast {
             }
         } else {
             error!("cast must be in Ready state to render");
-            false
+            Ok(false)
         }
     }
 
