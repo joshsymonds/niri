@@ -393,6 +393,7 @@ impl State {
             let res = pw.start_cast(
                 gbm.clone(),
                 render_formats.clone(),
+                self.niri.casting.implicit_modifier_renderable,
                 pending.session_id,
                 pending.stream_id,
                 target.clone(),
@@ -479,6 +480,7 @@ impl State {
                 let res = pw.start_cast(
                     gbm,
                     render_formats,
+                    self.niri.casting.implicit_modifier_renderable,
                     session_id,
                     stream_id,
                     target,
