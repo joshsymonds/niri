@@ -1010,11 +1010,18 @@ fn probe_implicit_modifier_renderable(
     let size = Size::from((64, 64));
     let mut dmabuf = match allocate_dmabuf(gbm, size, Fourcc::Argb8888, Modifier::Invalid) {
         Ok(dmabuf) => dmabuf,
-        Err(_) => return false,
+        Err(err) => {
+            debug!("implicit modifier probe: allocation failed: {err:?}");
+            return false;
+        }
     };
 
-    let renderable = renderer.bind(&mut dmabuf).is_ok();
-    renderable
+    if let Err(err) = renderer.bind(&mut dmabuf).map(|_| ()) {
+        debug!("implicit modifier probe: bind failed: {err:?}");
+        return false;
+    }
+
+    true
 }
 
 /// Decides the screencast format set to offer based on whether the implicit modifier is known to
@@ -1022,6 +1029,12 @@ fn probe_implicit_modifier_renderable(
 ///
 /// `force_pipewire_invalid_modifier` is a debug flag that forces the implicit-modifier path for
 /// testing purposes; when set, it always wins and the formats are returned unchanged.
+///
+/// The flag deliberately gates only the offer set, not the negotiation guard in `param_changed`:
+/// on a host where the probe failed, a client that fixates the forced implicit modifier is still
+/// renegotiated to SHM, because the modifier genuinely cannot be bound there. The flag's
+/// end-to-end use (exercising the implicit-modifier dmabuf path) is on hosts where the probe
+/// succeeds.
 fn strip_unsupported_implicit_modifier(
     formats: FormatSet,
     implicit_modifier_renderable: Option<bool>,
