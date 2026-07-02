@@ -129,6 +129,13 @@ struct CastInner {
     /// Same ordering contract as `rendering_buffers`: oldest to newest, queued to PipeWire in
     /// order once their fences signal and the pixels are copied over.
     pending_shm_frames: Vec<PendingShmFrame>,
+    /// Whether this cast has already renegotiated from DMA-BUF to SHM sharing because a
+    /// DMA-BUF-path render failed.
+    ///
+    /// The renegotiation is attempted once per cast lifetime. If a DMA-BUF-path render fails
+    /// again afterwards, the cast is stopped instead of renegotiated again, so a client that
+    /// never accepts the SHM offer can't cause an infinite stream of render-failure warnings.
+    shm_fallback_attempted: bool,
 }
 
 /// An SHM cast frame waiting for its GPU-to-PBO readback to finish.
@@ -381,6 +388,59 @@ macro_rules! make_video_params_for_initial_negotiation_macro {
     };
 }
 
+/// Outcome of checking a set of DMA-BUF modifiers (fixated by the client, or offered by it as
+/// alternatives) against whether the primary renderer can bind the implicit modifier.
+#[derive(Debug, PartialEq, Eq)]
+enum ModifierDecision {
+    /// Proceed with DMA-BUF negotiation using these modifiers.
+    UseModifiers(Vec<i64>),
+    /// None of the given modifiers can be used; the cast must be renegotiated down to SHM.
+    RenegotiateShm,
+}
+
+/// Removes the implicit modifier (`Modifier::Invalid`) from `modifiers` when the primary renderer
+/// is known not to be able to bind it (`implicit_modifier_renderable == Some(false)`). Explicit
+/// modifiers are never removed.
+///
+/// If filtering leaves no modifiers at all, the caller must renegotiate the cast down to SHM
+/// instead of proceeding with DMA-BUF.
+fn filter_unbindable_modifiers(
+    modifiers: Vec<i64>,
+    implicit_modifier_renderable: Option<bool>,
+) -> ModifierDecision {
+    if implicit_modifier_renderable != Some(false) {
+        return ModifierDecision::UseModifiers(modifiers);
+    }
+
+    let invalid = u64::from(Modifier::Invalid) as i64;
+    let filtered: Vec<i64> = modifiers.into_iter().filter(|m| *m != invalid).collect();
+
+    if filtered.is_empty() {
+        ModifierDecision::RenegotiateShm
+    } else {
+        ModifierDecision::UseModifiers(filtered)
+    }
+}
+
+/// Re-offers the stream with a modifier-less (SHM-only) format for the given video format, size,
+/// and refresh rate.
+///
+/// Used to renegotiate a cast down to SHM sharing, either because none of the client's fixated
+/// modifiers can be bound by the primary renderer, or because a live DMA-BUF cast failed to
+/// render and is falling back to SHM as a last resort.
+fn renegotiate_to_shm(
+    stream: &Stream,
+    video_format: VideoFormat,
+    size: Size<u32, Physical>,
+    refresh: u32,
+) -> Result<(), pipewire::Error> {
+    let o = make_video_params(&[video_format], &[], size, refresh, false);
+    let mut b = Vec::new();
+    let pod = make_pod(&mut b, o);
+    let mut params = vec![pod];
+    stream.update_params(&mut params)
+}
+
 impl PipeWire {
     pub fn new(
         event_loop: LoopHandle<'static, State>,
@@ -435,6 +495,7 @@ impl PipeWire {
         &self,
         gbm: GbmDevice<DrmDeviceFd>,
         formats: FormatSet,
+        implicit_modifier_renderable: Option<bool>,
         session_id: CastSessionId,
         stream_id: CastStreamId,
         target: CastTarget,
@@ -488,6 +549,7 @@ impl PipeWire {
             shmbufs: HashMap::new(),
             rendering_buffers: Vec::new(),
             pending_shm_frames: Vec::new(),
+            shm_fallback_attempted: false,
         }));
 
         let listener = stream
@@ -639,6 +701,24 @@ impl PipeWire {
                                 return;
                             };
 
+                            let alternatives = match filter_unbindable_modifiers(alternatives, implicit_modifier_renderable) {
+                                ModifierDecision::UseModifiers(alternatives) => alternatives,
+                                ModifierDecision::RenegotiateShm => {
+                                    debug!(
+                                        "all fixated alternatives are unbindable implicit modifiers; \
+                                         renegotiating to SHM"
+                                    );
+
+                                    if let Err(err) =
+                                        renegotiate_to_shm(stream, format.format(), format_size, refresh)
+                                    {
+                                        warn!("error updating stream params: {err:?}");
+                                        stop_cast();
+                                    }
+                                    return;
+                                }
+                            };
+
                             let (modifier, plane_count) = match find_preferred_modifier(
                                 &gbm,
                                 format_size,
@@ -735,11 +815,35 @@ impl PipeWire {
                                         _ => {
                                             // We're negotiating a single modifier, or alpha or modifier changed,
                                             // so we need to do a test allocation.
+                                            let modifiers = match filter_unbindable_modifiers(
+                                                vec![format.modifier() as i64],
+                                                implicit_modifier_renderable,
+                                            ) {
+                                                ModifierDecision::UseModifiers(modifiers) => modifiers,
+                                                ModifierDecision::RenegotiateShm => {
+                                                    debug!(
+                                                        "client fixated an unbindable implicit modifier; \
+                                                         renegotiating to SHM"
+                                                    );
+
+                                                    if let Err(err) = renegotiate_to_shm(
+                                                        stream,
+                                                        format.format(),
+                                                        format_size,
+                                                        refresh,
+                                                    ) {
+                                                        warn!("error updating stream params: {err:?}");
+                                                        stop_cast();
+                                                    }
+                                                    return;
+                                                }
+                                            };
+
                                             let (modifier, plane_count) = match find_preferred_modifier(
                                                 &gbm,
                                                 format_size,
                                                 fourcc,
-                                                vec![format.modifier() as i64],
+                                                modifiers,
                                             ) {
                                                 Ok(x) => x,
                                                 Err(err) => {
@@ -1422,6 +1526,12 @@ impl Cast {
         }
     }
 
+    /// Dequeues a PipeWire buffer and renders into it.
+    ///
+    /// Returns `Ok(true)` if a frame was rendered, `Ok(false)` if the frame was skipped for a
+    /// non-fatal reason (no damage, no buffer available, or a DMA-BUF render failure that just
+    /// triggered an SHM fallback). Returns `Err` if the cast can no longer make progress and
+    /// should be stopped by the caller.
     #[allow(clippy::too_many_arguments)]
     pub fn dequeue_buffer_and_render(
         &mut self,
@@ -1430,7 +1540,7 @@ impl Cast {
         cursor_data: &CursorData<CastRenderElement<GlesRenderer>>,
         size: Size<i32, Physical>,
         scale: Scale<f64>,
-    ) -> bool {
+    ) -> anyhow::Result<bool> {
         let mut inner = self.inner.borrow_mut();
 
         if let CastState::Ready {
@@ -1484,14 +1594,14 @@ impl Cast {
 
             if damage.is_none() && !has_cursor_update {
                 trace!("no damage, skipping frame");
-                return false;
+                return Ok(false);
             }
             *last_cursor_location = Some(cursor_data.location);
             drop(inner);
 
             let Some(pw_buffer) = self.dequeue_available_buffer() else {
                 warn!("no available buffer in pw stream, skipping frame");
-                return false;
+                return Ok(false);
             };
             let buffer = pw_buffer.as_ptr();
 
@@ -1538,12 +1648,58 @@ impl Cast {
                                 );
                                 trace!("queueing buffer with seq={}", self.sequence_counter);
                                 self.queue_after_sync(pw_buffer, sync_point);
-                                true
+                                Ok(true)
                             }
                             Err(err) => {
                                 warn!("error rendering to dmabuf: {err:?}");
                                 return_unused_buffer(&self.stream, pw_buffer);
-                                false
+
+                                // We don't currently distinguish a bind failure from other
+                                // render failures here (anyhow's Error doesn't carry a
+                                // structured cause we can cheaply match on, and render_to_dmabuf
+                                // is shared with the clear-buffer path). Treating any DMA-BUF
+                                // render failure as grounds for an SHM fallback is still correct:
+                                // self-healing to SHM is strictly better than warning forever
+                                // (see the pathology this is meant to eliminate), and once the
+                                // fallback has been attempted once, we stop the cast rather than
+                                // loop.
+                                let mut inner = self.inner.borrow_mut();
+                                if inner.shm_fallback_attempted {
+                                    warn!(
+                                        "dmabuf render failed again after an SHM fallback was \
+                                         already attempted, stopping cast: {err:?}"
+                                    );
+                                    return Err(err);
+                                }
+                                inner.shm_fallback_attempted = true;
+
+                                warn!("dmabuf render failed, renegotiating cast to SHM: {err:?}");
+
+                                let video_format = if alpha {
+                                    VideoFormat::BGRA
+                                } else {
+                                    VideoFormat::BGRx
+                                };
+                                let format_size = Size::from((size.w as u32, size.h as u32));
+                                let refresh = inner.refresh;
+                                // Move out of Ready so no further dmabuf renders are attempted
+                                // while the client answers the re-offer (mirrors ensure_size).
+                                inner.state = CastState::ResizePending {
+                                    pending_size: format_size,
+                                };
+                                drop(inner);
+
+                                if let Err(update_err) = renegotiate_to_shm(
+                                    &self.stream,
+                                    video_format,
+                                    format_size,
+                                    refresh,
+                                ) {
+                                    warn!("error updating stream params: {update_err:?}");
+                                    return Err(update_err.into());
+                                }
+
+                                Ok(false)
                             }
                         }
                     }
@@ -1582,12 +1738,12 @@ impl Cast {
                                 self.queue_shm_after_readback(
                                     renderer, pw_buffer, shmbuf, mapping, fence,
                                 );
-                                true
+                                Ok(true)
                             }
                             Err(err) => {
                                 warn!("error rendering to shmbuf: {err:?}");
                                 return_unused_buffer(&self.stream, pw_buffer);
-                                false
+                                Ok(false)
                             }
                         }
                     }
@@ -1595,7 +1751,7 @@ impl Cast {
             }
         } else {
             error!("cast must be in Ready state to render");
-            false
+            Ok(false)
         }
     }
 
@@ -1770,7 +1926,7 @@ fn allocate_buffer(
     }
 }
 
-fn allocate_dmabuf(
+pub(super) fn allocate_dmabuf(
     gbm: &GbmDevice<DrmDeviceFd>,
     size: Size<u32, Physical>,
     fourcc: Fourcc,
@@ -2100,5 +2256,44 @@ mod tests {
 
         clear_shmbuf(&shmbuf);
         assert!(read_via_fd(&shmbuf).iter().all(|&b| b == 0));
+    }
+
+    fn invalid() -> i64 {
+        u64::from(Modifier::Invalid) as i64
+    }
+
+    #[test]
+    fn filters_invalid_from_mixed_list_when_not_renderable() {
+        let modifiers = vec![invalid(), 1, 2];
+        let result = filter_unbindable_modifiers(modifiers, Some(false));
+        assert_eq!(result, ModifierDecision::UseModifiers(vec![1, 2]));
+    }
+
+    #[test]
+    fn renegotiates_shm_when_only_invalid_and_not_renderable() {
+        let modifiers = vec![invalid()];
+        let result = filter_unbindable_modifiers(modifiers, Some(false));
+        assert_eq!(result, ModifierDecision::RenegotiateShm);
+    }
+
+    #[test]
+    fn unchanged_when_renderable() {
+        let modifiers = vec![invalid(), 1];
+        let result = filter_unbindable_modifiers(modifiers.clone(), Some(true));
+        assert_eq!(result, ModifierDecision::UseModifiers(modifiers));
+    }
+
+    #[test]
+    fn unchanged_when_not_probed() {
+        let modifiers = vec![invalid(), 1];
+        let result = filter_unbindable_modifiers(modifiers.clone(), None);
+        assert_eq!(result, ModifierDecision::UseModifiers(modifiers));
+    }
+
+    #[test]
+    fn unchanged_when_only_explicit_modifiers() {
+        let modifiers = vec![1, 2, 3];
+        let result = filter_unbindable_modifiers(modifiers.clone(), Some(false));
+        assert_eq!(result, ModifierDecision::UseModifiers(modifiers));
     }
 }
