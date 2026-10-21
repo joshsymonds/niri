@@ -58,6 +58,8 @@ window-rule {
     default-column-display "tabbed"
     default-floating-position x=100 y=200 relative-to="bottom-left"
     scroll-factor 0.75
+    pinch-sensitivity 1.25
+    on-xdg-activate "focus"
 
     focus-ring {
         // off
@@ -645,6 +647,34 @@ window-rule {
 > The rule only affects fully-mapped floating tiles.
 
 See also: [Floating Windows](./Floating-Windows.md), [Fullscreen and Maximize](./Fullscreen-and-Maximize.md).
+#### `on-xdg-activate`
+
+<sup>Since: next release</sup>
+
+Set what niri does when a window requests activation through [xdg-activation](https://wayland.app/protocols/xdg-activation-v1).
+
+Values:
+
+- `"ignore"`: do nothing: neither focus the window nor mark it urgent.
+- `"set-urgent"`: always mark the window urgent instead of focusing it.
+- `"focus"`: always focus the window, even for activation requests without a serial.
+
+The default behavior, when this rule is unset, picks between focusing and marking the window urgent based on the serial that the application provides when creating the activation token.
+Requests with a valid serial focus the target window, and requests without a serial mark it urgent.
+
+Requests with a set, but invalid, serial, are always ignored, which you can change with the [`honor-xdg-activation-with-invalid-serial`](https://niri-wm.github.io/niri/Configuration%3A-Debug-Options.html#honor-xdg-activation-with-invalid-serial) debug flag.
+
+This is useful for apps that steal focus on incoming messages or when opening popup windows like Picture-in-Picture.
+
+```kdl
+// Don't let Firefox PiP steal focus.
+window-rule {
+    match title="^Picture-in-Picture$"
+
+    open-floating true
+    on-xdg-activate "set-urgent"
+}
+```
 
 #### `opacity`
 
@@ -686,6 +716,18 @@ window-rule {
     match app-id="^mpv$"
 
     variable-refresh-rate true
+}
+```
+
+<sup>Since: next release</sup> You can set `variable-refresh-rate` to `"fullscreen-only"` to activate on-demand VRR only when this window is fullscreen on this output.
+The window must cover the entire screen (when niri hides the top layer-shell layer).
+
+This mode will work even when there are overlays over the fullscreen window.
+
+```kdl
+// Enable on-demand VRR when any window is fullscreen.
+window-rule {
+    variable-refresh-rate "fullscreen-only"
 }
 ```
 
@@ -777,6 +819,23 @@ window-rule {
     match app-id="firefox$"
 
     scroll-factor 0.75
+}
+```
+
+#### `pinch-sensitivity`
+
+<sup>Since: next release</sup>
+
+Set the sensitivity of pinch gestures sent to a window.
+
+This will be multiplied with the pinch sensitivity set for your touchpad in the [input section](./Configuration:-Input.md#pointing-devices).
+
+```kdl
+// Make pinch gestures in Firefox more sensitive.
+window-rule {
+    match app-id="firefox$"
+
+    pinch-sensitivity 1.25
 }
 ```
 

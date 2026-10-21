@@ -8,14 +8,13 @@ use calloop::LoopHandle;
 use smithay::backend::allocator::format::FormatSet;
 use smithay::backend::allocator::gbm::GbmDevice;
 use smithay::backend::allocator::Fourcc;
-use smithay::backend::drm::DrmDeviceFd;
 use smithay::backend::renderer::element::utils::{Relocate, RelocateRenderElement};
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::renderer::Bind;
 use smithay::desktop::Window;
 use smithay::output::Output;
 use smithay::reexports::gbm::Modifier;
-use smithay::utils::{Physical, Point, Scale, Size};
+use smithay::utils::{DeviceFd, Physical, Point, Scale, Size};
 use zbus::object_server::SignalEmitter;
 
 use crate::dbus::mutter_screen_cast::{self, CursorMode, ScreenCastToNiri, StreamTargetId};
@@ -114,12 +113,7 @@ impl Screencasting {
 }
 
 impl State {
-    fn prepare_pw_cast(&mut self) -> anyhow::Result<(GbmDevice<DrmDeviceFd>, FormatSet)> {
-        let gbm = self
-            .backend
-            .gbm_device()
-            .context("no GBM device available")?;
-
+    fn prepare_pw_cast(&mut self) -> anyhow::Result<Option<(GbmDevice<DeviceFd>, FormatSet)>> {
         // Ensure PipeWire is initialized.
         if self.niri.casting.pipewire.is_none() {
             let pw = PipeWire::new(
@@ -129,6 +123,15 @@ impl State {
             .context("error initializing PipeWire")?;
             self.niri.casting.pipewire = Some(pw);
         }
+
+        if self.niri.config.borrow().debug.disable_pipewire_dmabuf {
+            return Ok(None);
+        }
+
+        let Some(gbm) = self.backend.gbm_device() else {
+            // We will offer shm only.
+            return Ok(None);
+        };
 
         let cached_probe = self.niri.casting.implicit_modifier_renderable;
         let (mut render_formats, probe_result) = self
@@ -174,7 +177,7 @@ impl State {
             force_invalid_modifier,
         );
 
-        Ok((gbm, render_formats))
+        Ok(Some((gbm, render_formats)))
     }
 
     pub fn on_pw_msg(&mut self, msg: PwToNiri) {
@@ -217,7 +220,7 @@ impl State {
             CastTarget::Nothing => {
                 self.backend.with_primary_renderer(|renderer| {
                     if cast.dequeue_buffer_and_clear(renderer) {
-                        cast.last_frame_time = get_monotonic_time();
+                        cast.record_frame_time(get_monotonic_time());
                     }
                 });
                 return;
@@ -239,7 +242,7 @@ impl State {
         if locked {
             self.backend.with_primary_renderer(|renderer| {
                 if cast.dequeue_buffer_and_clear(renderer) {
-                    cast.last_frame_time = get_monotonic_time();
+                    cast.record_frame_time(get_monotonic_time());
                 }
             });
             return;
@@ -321,7 +324,7 @@ impl State {
                     scale,
                 ) {
                     Ok(true) => {
-                        cast.last_frame_time = get_monotonic_time();
+                        cast.record_frame_time(get_monotonic_time());
                         false
                     }
                     Ok(false) => false,
@@ -426,7 +429,7 @@ impl State {
             }
         };
 
-        let (gbm, render_formats) = match self.prepare_pw_cast() {
+        let gbm = match self.prepare_pw_cast() {
             Ok(x) => x,
             Err(err) => {
                 warn!("error starting pending screencasts: {err:?}");
@@ -450,7 +453,6 @@ impl State {
         for pending in self.niri.casting.pending_dynamic_casts.drain(..) {
             let res = pw.start_cast(
                 gbm.clone(),
-                render_formats.clone(),
                 self.niri.casting.implicit_modifier_renderable,
                 pending.session_id,
                 pending.stream_id,
@@ -527,7 +529,7 @@ impl State {
                     }
                 };
 
-                let (gbm, render_formats) = match self.prepare_pw_cast() {
+                let gbm = match self.prepare_pw_cast() {
                     Ok(x) => x,
                     Err(err) => {
                         warn!("error starting screencast: {err:?}");
@@ -539,7 +541,6 @@ impl State {
 
                 let res = pw.start_cast(
                     gbm,
-                    render_formats,
                     self.niri.casting.implicit_modifier_renderable,
                     session_id,
                     stream_id,
@@ -783,7 +784,7 @@ impl Niri {
             let cursor_data = cursor_data.as_ref().unwrap();
 
             match cast.dequeue_buffer_and_render(renderer, &elements, cursor_data, size, scale) {
-                Ok(true) => cast.last_frame_time = target_presentation_time,
+                Ok(true) => cast.record_frame_time(target_presentation_time),
                 Ok(false) => (),
                 Err(err) => {
                     warn!("error rendering cast, stopping screencast: {err:?}");
@@ -827,7 +828,7 @@ impl Niri {
             // alive and resumes automatically on unlock.
             if self.is_locked() {
                 if cast.dequeue_buffer_and_clear(renderer) {
-                    cast.last_frame_time = target_presentation_time;
+                    cast.record_frame_time(target_presentation_time);
                 }
                 continue;
             }
@@ -891,7 +892,7 @@ impl Niri {
                 bbox.size,
                 scale,
             ) {
-                Ok(true) => cast.last_frame_time = target_presentation_time,
+                Ok(true) => cast.record_frame_time(target_presentation_time),
                 Ok(false) => (),
                 Err(err) => {
                     warn!("error rendering cast, stopping screencast: {err:?}");
@@ -1005,7 +1006,7 @@ fn cast_params_for_output(output: &Output) -> (Size<i32, Physical>, u32) {
 /// conservatively as "not renderable".
 fn probe_implicit_modifier_renderable(
     renderer: &mut GlesRenderer,
-    gbm: &GbmDevice<DrmDeviceFd>,
+    gbm: &GbmDevice<DeviceFd>,
 ) -> bool {
     let size = Size::from((64, 64));
     let mut dmabuf = match allocate_dmabuf(gbm, size, Fourcc::Argb8888, Modifier::Invalid) {

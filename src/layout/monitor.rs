@@ -22,6 +22,7 @@ use super::workspace::{
 use super::{compute_overview_zoom, ActivateWindow, HitType, LayoutElement, Options};
 use crate::animation::{Animation, Clock, Curve};
 use crate::input::swipe_tracker::SwipeTracker;
+use crate::layout::RenderLayer;
 use crate::niri_render_elements;
 use crate::render_helpers::renderer::NiriRenderer;
 use crate::render_helpers::shadow::ShadowRenderElement;
@@ -409,6 +410,14 @@ impl<W: LayoutElement> Monitor<W> {
         &mut self.workspaces[self.active_workspace_idx]
     }
 
+    pub fn idx_of_ws(&self, id: WorkspaceId) -> Option<usize> {
+        self.workspaces.iter().position(|ws| ws.id() == id)
+    }
+
+    pub fn has_ws(&self, id: WorkspaceId) -> bool {
+        self.idx_of_ws(id).is_some()
+    }
+
     pub fn windows(&self) -> impl Iterator<Item = &W> {
         self.workspaces.iter().flat_map(|ws| ws.windows())
     }
@@ -505,7 +514,7 @@ impl<W: LayoutElement> Monitor<W> {
                 (self.active_workspace_idx, WorkspaceAddWindowTarget::Auto)
             }
             MonitorAddWindowTarget::Workspace { id, column_idx } => {
-                let idx = self.workspaces.iter().position(|ws| ws.id() == id).unwrap();
+                let idx = self.idx_of_ws(id).unwrap();
                 let target = if let Some(column_idx) = column_idx {
                     WorkspaceAddWindowTarget::NewColumnAt(column_idx)
                 } else {
@@ -545,6 +554,7 @@ impl<W: LayoutElement> Monitor<W> {
             width,
             is_full_width,
             is_floating,
+            None,
         );
     }
 
@@ -554,14 +564,15 @@ impl<W: LayoutElement> Monitor<W> {
         target_col_idx: Option<usize>,
         column: Column<W>,
         activate: bool,
+        anim: Option<niri_config::Animation>,
     ) {
         let workspace = &mut self.workspaces[workspace_idx];
 
-        workspace.add_column(target_col_idx, column, activate);
+        workspace.add_column(target_col_idx, column, activate, anim);
 
         // After adding a new window, workspace becomes this output's own.
         if workspace.name().is_none() {
-            workspace.original_output = OutputId::new(&self.output);
+            workspace.original_outputs = vec![OutputId::new(&self.output)];
         }
 
         if workspace_idx == self.workspaces.len() - 1 {
@@ -588,16 +599,25 @@ impl<W: LayoutElement> Monitor<W> {
         width: ColumnWidth,
         is_full_width: bool,
         is_floating: bool,
+        anim: Option<niri_config::Animation>,
     ) {
         let (mut workspace_idx, target) = self.resolve_add_window_target(target);
 
         let workspace = &mut self.workspaces[workspace_idx];
 
-        workspace.add_tile(tile, target, activate, width, is_full_width, is_floating);
+        workspace.add_tile(
+            tile,
+            target,
+            activate,
+            width,
+            is_full_width,
+            is_floating,
+            anim,
+        );
 
         // After adding a new window, workspace becomes this output's own.
         if workspace.name().is_none() {
-            workspace.original_output = OutputId::new(&self.output);
+            workspace.original_outputs = vec![OutputId::new(&self.output)];
         }
 
         if workspace_idx == self.workspaces.len() - 1 {
@@ -631,7 +651,7 @@ impl<W: LayoutElement> Monitor<W> {
 
         // After adding a new window, workspace becomes this output's own.
         if workspace.name().is_none() {
-            workspace.original_output = OutputId::new(&self.output);
+            workspace.original_outputs = vec![OutputId::new(&self.output)];
         }
 
         // Since we're adding window to an existing column, the workspace isn't empty, and
@@ -674,9 +694,10 @@ impl<W: LayoutElement> Monitor<W> {
     }
 
     pub fn unname_workspace(&mut self, id: WorkspaceId) -> bool {
-        let Some(ws) = self.workspaces.iter_mut().find(|ws| ws.id() == id) else {
+        let Some(idx) = self.idx_of_ws(id) else {
             return false;
         };
+        let ws = &mut self.workspaces[idx];
 
         ws.unname();
 
@@ -780,13 +801,13 @@ impl<W: LayoutElement> Monitor<W> {
 
     pub fn move_down_or_to_workspace_down(&mut self) {
         if !self.active_workspace().move_down() {
-            self.move_to_workspace_down(true);
+            self.move_to_workspace_down(ActivateWindow::Smart);
         }
     }
 
     pub fn move_up_or_to_workspace_up(&mut self) {
         if !self.active_workspace().move_up() {
-            self.move_to_workspace_up(true);
+            self.move_to_workspace_up(ActivateWindow::Smart);
         }
     }
 
@@ -802,72 +823,14 @@ impl<W: LayoutElement> Monitor<W> {
         }
     }
 
-    pub fn move_to_workspace_up(&mut self, focus: bool) {
-        let source_workspace_idx = self.active_workspace_idx;
-
-        let new_idx = source_workspace_idx.saturating_sub(1);
-        if new_idx == source_workspace_idx {
-            return;
-        }
-        let new_id = self.workspaces[new_idx].id();
-
-        let workspace = &mut self.workspaces[source_workspace_idx];
-        let Some(removed) = workspace.remove_active_tile(Transaction::new()) else {
-            return;
-        };
-
-        let activate = if focus {
-            ActivateWindow::Yes
-        } else {
-            ActivateWindow::Smart
-        };
-
-        self.add_tile(
-            removed.tile,
-            MonitorAddWindowTarget::Workspace {
-                id: new_id,
-                column_idx: None,
-            },
-            activate,
-            true,
-            removed.width,
-            removed.is_full_width,
-            removed.is_floating,
-        );
+    pub fn move_to_workspace_up(&mut self, activate: ActivateWindow) {
+        let new_idx = self.active_workspace_idx.saturating_sub(1);
+        self.move_to_workspace(None, new_idx, activate);
     }
 
-    pub fn move_to_workspace_down(&mut self, focus: bool) {
-        let source_workspace_idx = self.active_workspace_idx;
-
-        let new_idx = min(source_workspace_idx + 1, self.workspaces.len() - 1);
-        if new_idx == source_workspace_idx {
-            return;
-        }
-        let new_id = self.workspaces[new_idx].id();
-
-        let workspace = &mut self.workspaces[source_workspace_idx];
-        let Some(removed) = workspace.remove_active_tile(Transaction::new()) else {
-            return;
-        };
-
-        let activate = if focus {
-            ActivateWindow::Yes
-        } else {
-            ActivateWindow::Smart
-        };
-
-        self.add_tile(
-            removed.tile,
-            MonitorAddWindowTarget::Workspace {
-                id: new_id,
-                column_idx: None,
-            },
-            activate,
-            true,
-            removed.width,
-            removed.is_full_width,
-            removed.is_floating,
-        );
+    pub fn move_to_workspace_down(&mut self, activate: ActivateWindow) {
+        let new_idx = min(self.active_workspace_idx + 1, self.workspaces.len() - 1);
+        self.move_to_workspace(None, new_idx, activate);
     }
 
     pub fn move_to_workspace(
@@ -884,6 +847,7 @@ impl<W: LayoutElement> Monitor<W> {
         } else {
             self.active_workspace_idx
         };
+        let source_id = self.workspaces[source_workspace_idx].id();
 
         let new_idx = min(idx, self.workspaces.len() - 1);
         if new_idx == source_workspace_idx {
@@ -896,13 +860,24 @@ impl<W: LayoutElement> Monitor<W> {
         });
 
         let workspace = &mut self.workspaces[source_workspace_idx];
-        let transaction = Transaction::new();
-        let removed = if let Some(window) = window {
-            workspace.remove_tile(window, transaction)
-        } else if let Some(removed) = workspace.remove_active_tile(transaction) {
-            removed
-        } else {
+        let Some(window) = window.or_else(|| workspace.active_window().map(|win| win.id())) else {
             return;
+        };
+        let window = window.clone();
+
+        let mut old_render_pos = workspace
+            .tiles_with_render_positions()
+            .find_map(|(tile, offset, _visible)| (tile.window().id() == &window).then_some(offset))
+            .unwrap();
+
+        let transaction = Transaction::new();
+        let removed = workspace.remove_tile(&window, transaction);
+
+        // If the view is following the tile, match the animation.
+        let config = if activate {
+            self.options.animations.workspace_switch.0
+        } else {
+            self.options.animations.window_movement.0
         };
 
         self.add_tile(
@@ -920,53 +895,41 @@ impl<W: LayoutElement> Monitor<W> {
             removed.width,
             removed.is_full_width,
             removed.is_floating,
+            Some(config),
         );
 
         if self.workspace_switch.is_none() {
             self.clean_up_workspaces();
         }
+
+        let new_idx = self.idx_of_ws(new_id).unwrap();
+
+        // Animate vertical movement between workspaces.
+        //
+        // Recompute the source idx in case some workspace was removed during clean-up. If the
+        // source workspace itself was removed, don't bother animating this since the removal is
+        // instant anyway.
+        if let Some(source_workspace_idx) = self.idx_of_ws(source_id) {
+            old_render_pos.y +=
+                self.workspace_size_with_gap(1.).h * (source_workspace_idx as f64 - new_idx as f64);
+        }
+
+        let (tile, new_render_pos) = self.workspaces[new_idx]
+            .tiles_with_render_positions_mut(false)
+            .find(|(tile, _)| tile.window().id() == &window)
+            .unwrap();
+        tile.animate_move_from_with_config(old_render_pos - new_render_pos, config);
+        tile.set_anim_y_between_workspaces();
     }
 
     pub fn move_column_to_workspace_up(&mut self, activate: bool) {
-        let source_workspace_idx = self.active_workspace_idx;
-
-        let new_idx = source_workspace_idx.saturating_sub(1);
-        if new_idx == source_workspace_idx {
-            return;
-        }
-
-        let workspace = &mut self.workspaces[source_workspace_idx];
-        if workspace.floating_is_active() {
-            self.move_to_workspace_up(activate);
-            return;
-        }
-
-        let Some(column) = workspace.remove_active_column() else {
-            return;
-        };
-
-        self.add_column(new_idx, None, column, activate);
+        let new_idx = self.active_workspace_idx.saturating_sub(1);
+        self.move_column_to_workspace(new_idx, activate);
     }
 
     pub fn move_column_to_workspace_down(&mut self, activate: bool) {
-        let source_workspace_idx = self.active_workspace_idx;
-
-        let new_idx = min(source_workspace_idx + 1, self.workspaces.len() - 1);
-        if new_idx == source_workspace_idx {
-            return;
-        }
-
-        let workspace = &mut self.workspaces[source_workspace_idx];
-        if workspace.floating_is_active() {
-            self.move_to_workspace_down(activate);
-            return;
-        }
-
-        let Some(column) = workspace.remove_active_column() else {
-            return;
-        };
-
-        self.add_column(new_idx, None, column, activate);
+        let new_idx = min(self.active_workspace_idx + 1, self.workspaces.len() - 1);
+        self.move_column_to_workspace(new_idx, activate);
     }
 
     pub fn move_column_to_workspace(&mut self, idx: usize, activate: bool) {
@@ -988,11 +951,39 @@ impl<W: LayoutElement> Monitor<W> {
             return;
         }
 
-        let Some(column) = workspace.remove_active_column() else {
+        let Some(id) = workspace.scrolling().active_column().map(Column::id) else {
             return;
         };
+        let mut old_render_pos = workspace
+            .scrolling()
+            .columns_with_render_positions()
+            .find_map(|(col, pos)| (col.id() == id).then_some(pos))
+            .unwrap();
 
-        self.add_column(new_idx, None, column, activate);
+        let column = workspace.remove_active_column().unwrap();
+
+        // Animate vertical movement between workspaces.
+        old_render_pos.y +=
+            self.workspace_size_with_gap(1.).h * (source_workspace_idx as f64 - new_idx as f64);
+
+        // If the view is following the column, match the animation.
+        let config = if activate {
+            self.options.animations.workspace_switch.0
+        } else {
+            self.options.animations.window_movement.0
+        };
+
+        let new_id = self.workspaces[new_idx].id();
+        self.add_column(new_idx, None, column, activate, Some(config));
+
+        let new_idx = self.idx_of_ws(new_id).unwrap();
+        let (column, new_render_pos) = self.workspaces[new_idx]
+            .scrolling_mut()
+            .columns_with_render_positions_mut()
+            .find(|(col, _pos)| col.id() == id)
+            .unwrap();
+        column.animate_move_from_with_config(old_render_pos - new_render_pos, config);
+        column.set_anim_y_between_workspaces();
     }
 
     pub fn switch_workspace_up(&mut self) {
@@ -1025,7 +1016,7 @@ impl<W: LayoutElement> Monitor<W> {
 
     fn previous_workspace_idx(&self) -> Option<usize> {
         let id = self.previous_workspace_id?;
-        self.workspaces.iter().position(|w| w.id() == id)
+        self.idx_of_ws(id)
     }
 
     pub fn switch_workspace(&mut self, idx: usize) {
@@ -1278,11 +1269,15 @@ impl<W: LayoutElement> Monitor<W> {
             .filter(|_| focus_flash_alpha > 0.0)
             .map(|cfg| (cfg.flash_color, focus_flash_alpha));
 
+        for ws in &mut self.workspaces {
+            ws.update_render_elements(is_active, RenderLayer::MovingBetweenWorkspaces, focus_flash);
+        }
+
         // Broadcast to every workspace: during a workspace-switch animation both source
         // and destination are visible, and the destination's tile must already be
         // flashing when it scrolls in. Per-tile `is_active` gates the lerp downstream.
         for (ws, geo) in self.workspaces_with_render_geo_mut(true) {
-            ws.update_render_elements(is_active, focus_flash);
+            ws.update_render_elements(is_active, RenderLayer::Normal, focus_flash);
 
             if Some(ws.id()) == insert_hint_ws_id {
                 insert_hint_ws_geo = Some(geo);
@@ -1293,7 +1288,8 @@ impl<W: LayoutElement> Monitor<W> {
         if let Some(hint) = &self.insert_hint {
             match hint.workspace {
                 InsertWorkspace::Existing(ws_id) => {
-                    if let Some(ws) = self.workspaces.iter().find(|ws| ws.id() == ws_id) {
+                    if let Some(idx) = self.idx_of_ws(ws_id) {
+                        let ws = &self.workspaces[idx];
                         if let Some(mut area) = ws.insert_hint_area(hint.position) {
                             let scale = ws.scale().fractional_scale();
                             let view_size = ws.view_size();
@@ -1687,15 +1683,22 @@ impl<W: LayoutElement> Monitor<W> {
         })
     }
 
-    pub fn workspaces_with_render_geo(
+    pub fn workspaces_with_render_geo_cull(
         &self,
+        cull: bool,
     ) -> impl Iterator<Item = (&Workspace<W>, Rectangle<f64, Logical>)> {
         let output_geo = Rectangle::from_size(self.view_size);
 
         let geo = self.workspaces_render_geo();
         zip(self.workspaces.iter(), geo)
             // Cull out workspaces outside the output.
-            .filter(move |(_ws, geo)| geo.intersection(output_geo).is_some())
+            .filter(move |(_ws, geo)| !cull || geo.intersection(output_geo).is_some())
+    }
+
+    pub fn workspaces_with_render_geo(
+        &self,
+    ) -> impl Iterator<Item = (&Workspace<W>, Rectangle<f64, Logical>)> {
+        self.workspaces_with_render_geo_cull(true)
     }
 
     pub fn workspaces_with_render_geo_idx(
@@ -1818,14 +1821,18 @@ impl<W: LayoutElement> Monitor<W> {
         (InsertWorkspace::NewAt(last_idx + 1), dummy)
     }
 
-    pub fn render_above_top_layer(&self) -> bool {
+    pub fn fullscreen_window_above_top_layer(&self) -> Option<&W> {
         // Render above the top layer only if the view is stationary.
         if self.workspace_switch.is_some() || self.overview_progress.is_some() {
-            return false;
+            return None;
         }
 
         let ws = &self.workspaces[self.active_workspace_idx];
-        ws.render_above_top_layer()
+        ws.fullscreen_window_above_top_layer()
+    }
+
+    pub fn render_above_top_layer(&self) -> bool {
+        self.fullscreen_window_above_top_layer().is_some()
     }
 
     pub fn render_insert_hint_between_workspaces<R: NiriRenderer>(
@@ -1876,47 +1883,6 @@ impl<W: LayoutElement> Monitor<W> {
         // Ceil the height in physical pixels.
         let height = (self.view_size.h * scale).ceil() as i32;
 
-        // Crop the elements to prevent them overflowing, currently visible during a workspace
-        // switch.
-        //
-        // HACK: crop to infinite bounds at least horizontally where we
-        // know there's no workspace joining or monitor bounds, otherwise
-        // it will cut pixel shaders and mess up the coordinate space.
-        // There's also a damage tracking bug which causes glitched
-        // rendering for maximized GTK windows.
-        //
-        // FIXME: use proper bounds after fixing the Crop element.
-        let crop_bounds = if self.workspace_switch.is_some() || self.overview_progress.is_some() {
-            Rectangle::new(
-                Point::from((-i32::MAX / 2, 0)),
-                Size::from((i32::MAX, height)),
-            )
-        } else {
-            Rectangle::new(
-                Point::from((-i32::MAX / 2, -i32::MAX / 2)),
-                Size::from((i32::MAX, i32::MAX)),
-            )
-        };
-
-        // Clip the scrolling render to the working area in normal mode so columns
-        // that scroll past the working-area edge are clipped at layer-shell
-        // exclusive zones (e.g. a left-anchored bar) instead of bleeding under
-        // them. Floating / insert-hint / focus-flash continue to use the existing
-        // `crop_bounds`: floating already clamps to the working area at the
-        // layout level, and conflating policy with render crop would clip windows
-        // a user has deliberately positioned over a transparent bar.
-        //
-        // During a workspace switch or overview transition, keep the existing
-        // bounds — see the HACK comment above for why horizontal cropping during
-        // those transitions is unsafe (pixel shaders, GTK damage-tracking bug).
-        let scrolling_crop_bounds = compute_scrolling_crop_bounds(
-            self.working_area,
-            scale,
-            self.workspace_switch.is_some(),
-            self.overview_progress.is_some(),
-            crop_bounds,
-        );
-
         let zoom = self.overview_zoom();
 
         let insert_hint_render_loc = self
@@ -1935,73 +1901,177 @@ impl<W: LayoutElement> Monitor<W> {
             )
         };
 
-        for (ws, geo) in self.workspaces_with_render_geo() {
-            // Macro instead of closure because ws and insert hint have different elem types.
-            macro_rules! push {
-                () => {{
-                    &mut |elem| {
-                        let elem = CropRenderElement::from_element(elem, scale, crop_bounds);
-                        if let Some(elem) = elem {
-                            let elem = MonitorInnerRenderElement::from(elem);
-                            push(scale_relocate(geo, elem));
-                        }
-                    }
-                }};
-            }
+        // Draw in passes for correct Z ordering during window movement between workspaces:
+        // - floating windows moving between workspaces
+        // - normal floating windows
+        // - scrolling windows moving between workspaces
+        // - normal scrolling windows
+        for pass in 0..4 {
+            // Don't cull when drawing windows moving between workspaces so that windows moving to
+            // workspaces off-screen will still render.
+            let cull = matches!(pass, 1 | 3);
 
-            // Sibling macro for the scrolling-layer render. Identical to `push!`
-            // except it uses `scrolling_crop_bounds`, so columns that scroll past
-            // the working-area edge are clipped at layer-shell exclusive zones.
-            macro_rules! push_scrolling {
-                () => {{
-                    &mut |elem| {
-                        let elem =
-                            CropRenderElement::from_element(elem, scale, scrolling_crop_bounds);
-                        if let Some(elem) = elem {
-                            let elem = MonitorInnerRenderElement::from(elem);
-                            push(scale_relocate(geo, elem));
-                        }
-                    }
-                }};
-            }
-
-            let xray_pos = XrayPos::new(geo.loc, zoom);
-
-            // Two-pass floating render. The renderer paints first-emitted
-            // at the TOP of the on-screen z-stack (front-to-back order, per
-            // smithay's OutputDamageTracker), so flagged tiles must emit
-            // FIRST to land visually above scrolling content — including
-            // fullscreen windows, which live in the scrolling layout.
+            // Crop the elements to prevent them overflowing, currently visible during a workspace
+            // switch.
             //
-            // Emission order is therefore the inverse of the on-screen
-            // z-position: AboveFullscreen → BelowFullscreen → insert hint
-            // → scrolling. On screen (top → bottom): flagged floating
-            // (AboveFullscreen) → non-flagged floating (BelowFullscreen)
-            // → insert hint → scrolling.
-            ws.render_floating(
-                ctx.r(),
-                xray_pos,
-                focus_ring,
-                FloatingRenderPass::AboveFullscreen,
-                push!(),
-            );
+            // HACK: crop to infinite bounds at least horizontally where we
+            // know there's no workspace joining or monitor bounds, otherwise
+            // it will cut pixel shaders and mess up the coordinate space.
+            // There's also a damage tracking bug which causes glitched
+            // rendering for maximized GTK windows.
+            //
+            // FIXME: use proper bounds after fixing the Crop element.
+            //
+            // Also, check cull here to avoid cropping windows moving between workspaces.
+            //
+            // FIXME: for cull=true, it might be better visually to crop to a workspace-high region
+            // anchored to the window/column as it moves between workspaces, to prevent overflowing
+            // windows from appearing and disappearing.
+            let crop_bounds =
+                if cull && (self.workspace_switch.is_some() || self.overview_progress.is_some()) {
+                    Rectangle::new(
+                        Point::from((-i32::MAX / 2, 0)),
+                        Size::from((i32::MAX, height)),
+                    )
+                } else {
+                    Rectangle::new(
+                        Point::from((-i32::MAX / 2, -i32::MAX / 2)),
+                        Size::from((i32::MAX, i32::MAX)),
+                    )
+                };
 
-            ws.render_floating(
-                ctx.r(),
-                xray_pos,
-                focus_ring,
-                FloatingRenderPass::BelowFullscreen,
-                push!(),
-            );
+            // Clip the scrolling render to the working area in normal mode so columns
+            // that scroll past the working-area edge are clipped at layer-shell
+            // exclusive zones (e.g. a left-anchored bar) instead of bleeding under
+            // them. Floating / insert-hint / focus-flash continue to use the existing
+            // `crop_bounds`: floating already clamps to the working area at the
+            // layout level, and conflating policy with render crop would clip windows
+            // a user has deliberately positioned over a transparent bar.
+            //
+            // During a workspace switch or overview transition, keep the existing
+            // bounds — see the HACK comment above for why horizontal cropping during
+            // those transitions is unsafe (pixel shaders, GTK damage-tracking bug).
+            //
+            // Columns moving between workspaces (the non-culled pass) render in their
+            // destination workspace's coordinate space while visually still near the
+            // source, so a working-area crop would cut them off; they keep the
+            // uncropped `crop_bounds`.
+            let scrolling_crop_bounds = if cull {
+                compute_scrolling_crop_bounds(
+                    self.working_area,
+                    scale,
+                    self.workspace_switch.is_some(),
+                    self.overview_progress.is_some(),
+                    crop_bounds,
+                )
+            } else {
+                crop_bounds
+            };
 
-            if let Some(loc) = insert_hint_render_loc {
-                if loc.workspace == InsertWorkspace::Existing(ws.id()) {
-                    self.insert_hint_element
-                        .render(ctx.renderer, loc.location, push!());
+            for (ws, geo) in self.workspaces_with_render_geo_cull(cull) {
+                // Macro instead of closure because ws and insert hint have different elem types.
+                macro_rules! push {
+                    () => {{
+                        &mut |elem| {
+                            let elem = CropRenderElement::from_element(elem, scale, crop_bounds);
+                            if let Some(elem) = elem {
+                                let elem = MonitorInnerRenderElement::from(elem);
+                                push(scale_relocate(geo, elem));
+                            }
+                        }
+                    }};
+                }
+
+                // Sibling macro for the scrolling-layer render. Identical to `push!`
+                // except it uses `scrolling_crop_bounds`, so columns that scroll past
+                // the working-area edge are clipped at layer-shell exclusive zones.
+                macro_rules! push_scrolling {
+                    () => {{
+                        &mut |elem| {
+                            let elem =
+                                CropRenderElement::from_element(elem, scale, scrolling_crop_bounds);
+                            if let Some(elem) = elem {
+                                let elem = MonitorInnerRenderElement::from(elem);
+                                push(scale_relocate(geo, elem));
+                            }
+                        }
+                    }};
+                }
+
+                let xray_pos = XrayPos::new(geo.loc, zoom);
+
+                // Each floating layer renders in two passes. The renderer paints
+                // first-emitted at the TOP of the on-screen z-stack (front-to-back
+                // order, per smithay's OutputDamageTracker), so flagged tiles must
+                // emit FIRST to land visually above scrolling content — including
+                // fullscreen windows, which live in the scrolling layout.
+                //
+                // Emission order within a floating layer is therefore the inverse of
+                // the on-screen z-position: AboveFullscreen → BelowFullscreen →
+                // insert hint. On screen (top → bottom): flagged floating
+                // (AboveFullscreen) → non-flagged floating (BelowFullscreen) →
+                // insert hint → scrolling.
+                match pass {
+                    0 => {
+                        for floating_pass in [
+                            FloatingRenderPass::AboveFullscreen,
+                            FloatingRenderPass::BelowFullscreen,
+                        ] {
+                            ws.render_floating(
+                                ctx.r(),
+                                xray_pos,
+                                focus_ring,
+                                RenderLayer::MovingBetweenWorkspaces,
+                                floating_pass,
+                                push!(),
+                            );
+                        }
+                    }
+                    1 => {
+                        for floating_pass in [
+                            FloatingRenderPass::AboveFullscreen,
+                            FloatingRenderPass::BelowFullscreen,
+                        ] {
+                            ws.render_floating(
+                                ctx.r(),
+                                xray_pos,
+                                focus_ring,
+                                RenderLayer::Normal,
+                                floating_pass,
+                                push!(),
+                            );
+                        }
+
+                        if let Some(loc) = insert_hint_render_loc {
+                            if loc.workspace == InsertWorkspace::Existing(ws.id()) {
+                                self.insert_hint_element.render(
+                                    ctx.renderer,
+                                    loc.location,
+                                    push!(),
+                                );
+                            }
+                        }
+                    }
+                    2 => {
+                        ws.render_scrolling(
+                            ctx.r(),
+                            xray_pos,
+                            focus_ring,
+                            RenderLayer::MovingBetweenWorkspaces,
+                            push_scrolling!(),
+                        );
+                    }
+                    _ => {
+                        ws.render_scrolling(
+                            ctx.r(),
+                            xray_pos,
+                            focus_ring,
+                            RenderLayer::Normal,
+                            push_scrolling!(),
+                        );
+                    }
                 }
             }
-
-            ws.render_scrolling(ctx.r(), xray_pos, focus_ring, push_scrolling!());
         }
     }
 

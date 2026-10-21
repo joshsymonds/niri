@@ -16,6 +16,7 @@ use super::{
     ConfigureIntent, InteractiveResizeData, LayoutElement, Options, RemovedTile, SizeFrac,
 };
 use crate::animation::{Animation, Clock};
+use crate::layout::RenderLayer;
 use crate::niri_render_elements;
 use crate::render_helpers::renderer::NiriRenderer;
 use crate::render_helpers::xray::XrayPos;
@@ -77,10 +78,11 @@ pub struct FloatingSpace<W: LayoutElement> {
 /// on-screen z-position (which matches the user-facing semantic of
 /// the `render-above-fullscreen` window rule), NOT the emit order.
 ///
-/// Emit order (in `Monitor::render_workspaces`):
+/// Emit order (in `Monitor::render_workspaces`), within each floating
+/// [`RenderLayer`] (windows moving between workspaces first, then normal):
 ///   1. `AboveFullscreen` — emitted first → topmost
 ///   2. `BelowFullscreen` — emitted second → below the above-fullscreen tiles
-///   3. (`render_scrolling`) — emitted last → bottommost
+///   3. (`render_scrolling`) — emitted after all floating layers → bottommost
 ///
 /// `Workspace::render_floating` bypasses its `is_floating_visible()`
 /// guard for the `AboveFullscreen` pass, so flagged tiles render even
@@ -302,10 +304,16 @@ impl<W: LayoutElement> FloatingSpace<W> {
         &mut self,
         is_active: bool,
         view_rect: Rectangle<f64, Logical>,
+        layer: RenderLayer,
         focus_flash: Option<(niri_config::Color, f32)>,
     ) {
         let active = self.active_window_id.clone();
         for (tile, offset) in self.tiles_with_offsets_mut() {
+            // Skip tiles belonging to a different render layer.
+            if layer.is_normal() == tile.is_moving_between_workspaces() {
+                continue;
+            }
+
             let id = tile.window().id();
             let is_active = is_active && Some(id) == active.as_ref();
 
@@ -387,7 +395,10 @@ impl<W: LayoutElement> FloatingSpace<W> {
     ///
     /// During animations, assumes the final tile position.
     pub fn active_window_visual_rectangle(&self) -> Option<Rectangle<f64, Logical>> {
-        let (tile, offset) = self.tiles_with_offsets().next()?;
+        let active_id = self.active_window_id.as_ref()?;
+        let (tile, offset) = self
+            .tiles_with_offsets()
+            .find(|(tile, _)| tile.window().id() == active_id)?;
 
         let window_pos = offset + tile.window_loc();
         let window_size = tile.window_size();
@@ -558,11 +569,6 @@ impl<W: LayoutElement> FloatingSpace<W> {
             self.raise_window(descendant_idx, idx);
             idx += 1;
         }
-    }
-
-    pub fn remove_active_tile(&mut self) -> Option<RemovedTile<W>> {
-        let id = self.active_window_id.clone()?;
-        Some(self.remove_tile(&id))
     }
 
     pub fn remove_tile(&mut self, id: &W::Id) -> RemovedTile<W> {
@@ -1124,7 +1130,7 @@ impl<W: LayoutElement> FloatingSpace<W> {
         xray_pos: XrayPos,
         view_rect: Rectangle<f64, Logical>,
         focus_ring: bool,
-        pass: FloatingRenderPass,
+        (layer, pass): (RenderLayer, FloatingRenderPass),
         push: &mut dyn FnMut(FloatingSpaceRenderElement<R>),
     ) {
         let scale = Scale::from(self.scale);
@@ -1136,7 +1142,7 @@ impl<W: LayoutElement> FloatingSpace<W> {
         // Closing windows always render in the BelowFullscreen pass — we
         // don't track per-closing-window flag history, and closing
         // animations predate the render-above-fullscreen rule.
-        if pass == FloatingRenderPass::BelowFullscreen {
+        if layer.is_normal() && pass == FloatingRenderPass::BelowFullscreen {
             for closing in self.closing_windows.iter().rev() {
                 let elem = closing.render(ctx.as_gles(), view_rect, scale);
                 push(elem.into());
@@ -1145,6 +1151,11 @@ impl<W: LayoutElement> FloatingSpace<W> {
 
         let active = self.active_window_id.clone();
         for (tile, tile_pos) in self.tiles_with_render_positions() {
+            // Skip tiles belonging to a different render layer.
+            if layer.is_normal() == tile.is_moving_between_workspaces() {
+                continue;
+            }
+
             let above = tile.window().rules().render_above_fullscreen == Some(true);
             let include = match pass {
                 FloatingRenderPass::BelowFullscreen => !above,
