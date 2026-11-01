@@ -567,6 +567,15 @@ impl State {
     }
 }
 
+impl Screencasting {
+    /// Whether an active (streaming) window cast targets the window with this id.
+    pub fn is_window_actively_cast(&self, id: u64) -> bool {
+        self.casts
+            .iter()
+            .any(|cast| cast.target == (CastTarget::Window { id }) && cast.is_active())
+    }
+}
+
 impl Niri {
     pub fn refresh_mapped_cast_window_rules(&mut self) {
         // O(N^2) but should be fine since there aren't many casts usually.
