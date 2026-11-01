@@ -4706,10 +4706,9 @@ impl Niri {
                 // Render and send to PipeWire screencast streams.
                 self.render_for_screen_cast(renderer, output, target_presentation_time);
 
-                // FIXME: when a window is hidden, it should probably still receive frame callbacks
-                // and get rendered for screen cast. This is currently
-                // unimplemented, but happens to work by chance, since output
-                // redrawing is more eager than it should be.
+                // Window casts render hidden windows too: their commits queue a redraw of this
+                // output, and send_frame_callbacks() keeps them receiving frame callbacks at
+                // this output's refresh rate while they're actively cast.
                 self.render_windows_for_screen_cast(renderer, output, target_presentation_time);
             }
 
@@ -5031,47 +5030,62 @@ impl Niri {
         let state = self.output_state.get(output).unwrap();
         let sequence = state.frame_callback_sequence;
 
-        let should_send = |surface: &WlSurface, states: &SurfaceData| {
-            // Do the standard primary scanout output check. For pointer surfaces it deduplicates
-            // the frame callbacks across potentially multiple outputs, and for regular windows and
-            // layer-shell surfaces it avoids sending frame callbacks to invisible surfaces.
-            let current_primary_output = surface_primary_scanout_output(surface, states);
-            if current_primary_output.as_ref() != Some(output) {
-                return None;
-            }
-
-            // Next, check the throttling status.
-            let frame_throttling_state = states
-                .data_map
-                .get_or_insert(SurfaceFrameThrottlingState::default);
-            let mut last_sent_at = frame_throttling_state.last_sent_at.borrow_mut();
-
-            let mut send = true;
-
-            // If we already sent a frame callback to this surface this output refresh
-            // cycle, don't send one again to prevent empty-damage commit busy loops.
-            if let Some((last_output, last_sequence)) = &*last_sent_at {
-                if last_output == output && *last_sequence == sequence {
-                    send = false;
+        let should_send = |include_hidden: bool| {
+            move |surface: &WlSurface, states: &SurfaceData| {
+                // Do the standard primary scanout output check. For pointer surfaces it
+                // deduplicates the frame callbacks across potentially multiple outputs, and for
+                // regular windows and layer-shell surfaces it avoids sending frame callbacks to
+                // invisible surfaces.
+                let current_primary_output = surface_primary_scanout_output(surface, states);
+                if !frame_callback_output_matches(
+                    current_primary_output.as_ref(),
+                    output,
+                    include_hidden,
+                ) {
+                    return None;
                 }
-            }
 
-            if send {
-                *last_sent_at = Some((output.clone(), sequence));
-                Some(output.clone())
-            } else {
-                None
+                // Next, check the throttling status.
+                let frame_throttling_state = states
+                    .data_map
+                    .get_or_insert(SurfaceFrameThrottlingState::default);
+                let mut last_sent_at = frame_throttling_state.last_sent_at.borrow_mut();
+
+                let mut send = true;
+
+                // If we already sent a frame callback to this surface this output refresh
+                // cycle, don't send one again to prevent empty-damage commit busy loops.
+                if let Some((last_output, last_sequence)) = &*last_sent_at {
+                    if last_output == output && *last_sequence == sequence {
+                        send = false;
+                    }
+                }
+
+                if send {
+                    *last_sent_at = Some((output.clone(), sequence));
+                    Some(output.clone())
+                } else {
+                    None
+                }
             }
         };
 
         let frame_callback_time = get_monotonic_time();
 
         for mapped in self.layout.windows_for_output_mut(output) {
+            // Windows targeted by an active window screencast keep receiving frame callbacks
+            // while hidden, paced by this output's refresh cycle, so that the cast doesn't
+            // freeze when the window is on an inactive workspace or scrolled out of view.
+            #[cfg(feature = "xdp-gnome-screencast")]
+            let include_hidden = self.casting.is_window_actively_cast(mapped.id().get());
+            #[cfg(not(feature = "xdp-gnome-screencast"))]
+            let include_hidden = false;
+
             mapped.send_frame(
                 output,
                 frame_callback_time,
                 FRAME_CALLBACK_THROTTLE,
-                should_send,
+                should_send(include_hidden),
             );
         }
 
@@ -5080,7 +5094,7 @@ impl Niri {
                 output,
                 frame_callback_time,
                 FRAME_CALLBACK_THROTTLE,
-                should_send,
+                should_send(false),
             );
         }
 
@@ -5090,7 +5104,7 @@ impl Niri {
                 output,
                 frame_callback_time,
                 FRAME_CALLBACK_THROTTLE,
-                should_send,
+                should_send(false),
             );
         }
 
@@ -5100,7 +5114,7 @@ impl Niri {
                 output,
                 frame_callback_time,
                 FRAME_CALLBACK_THROTTLE,
-                should_send,
+                should_send(false),
             );
         }
 
@@ -5110,7 +5124,7 @@ impl Niri {
                 output,
                 frame_callback_time,
                 FRAME_CALLBACK_THROTTLE,
-                should_send,
+                should_send(false),
             );
         }
     }
@@ -6493,6 +6507,24 @@ impl ClientData for ClientState {
     fn disconnected(&self, _client_id: ClientId, _reason: DisconnectReason) {}
 }
 
+/// Whether a surface whose primary scanout output is `primary` should get frame callbacks from
+/// `output`'s refresh cycle.
+///
+/// Surfaces visible on `output` qualify. With `include_hidden`, surfaces visible nowhere (no
+/// primary scanout output) qualify too; this keeps windows targeted by an active window screencast
+/// rendering while hidden. A surface visible on a different output never qualifies, since that
+/// output's own refresh cycle sends its frame callbacks.
+fn frame_callback_output_matches(
+    primary: Option<&Output>,
+    output: &Output,
+    include_hidden: bool,
+) -> bool {
+    match primary {
+        Some(primary) => primary == output,
+        None => include_hidden,
+    }
+}
+
 fn scale_relocate_crop<E: Element>(
     elem: E,
     output_scale: Scale<f64>,
@@ -6539,5 +6571,45 @@ niri_render_elements! {
         Texture = PrimaryGpuTextureRenderElement,
         // Used for the CPU-rendered panels.
         RelocatedMemoryBuffer = RelocateRenderElement<MemoryRenderBufferRenderElement<R>>,
+    }
+}
+
+#[cfg(test)]
+mod frame_callback_tests {
+    use super::*;
+
+    fn output(name: &str) -> Output {
+        Output::new(
+            name.to_owned(),
+            PhysicalProperties {
+                size: Size::from((0, 0)),
+                subpixel: Subpixel::Unknown,
+                make: String::new(),
+                model: String::new(),
+                serial_number: String::new(),
+            },
+        )
+    }
+
+    #[test]
+    fn visible_on_this_output() {
+        let a = output("A");
+        assert!(frame_callback_output_matches(Some(&a), &a, false));
+        assert!(frame_callback_output_matches(Some(&a), &a, true));
+    }
+
+    #[test]
+    fn visible_on_other_output() {
+        let a = output("A");
+        let b = output("B");
+        assert!(!frame_callback_output_matches(Some(&b), &a, false));
+        assert!(!frame_callback_output_matches(Some(&b), &a, true));
+    }
+
+    #[test]
+    fn hidden_only_when_included() {
+        let a = output("A");
+        assert!(!frame_callback_output_matches(None, &a, false));
+        assert!(frame_callback_output_matches(None, &a, true));
     }
 }
