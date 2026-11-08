@@ -911,16 +911,19 @@ impl State {
         //
         // Unlike wlr-screencopy, a session is an explicit protocol object, so
         // the cast lifetime is tied to it. Dead sessions are already dropped by
-        // refresh_image_copy_capture(), which runs before this.
+        // refresh_image_copy_capture(), which runs before this. Sessions which
+        // have requested only one frame are screenshots, not casts.
         let output_sessions = self
             .niri
             .image_copy_sessions
             .iter()
+            .filter(|s| s.is_cast())
             .map(|s| (s.session_id, s.stream_id, s.session.source(), s.credentials));
         let cursor_sessions = self
             .niri
             .image_copy_cursor_sessions
             .iter()
+            .filter(|s| s.is_cast())
             .map(|s| (s.session_id, s.stream_id, s.session.source(), s.credentials));
         for (session_id, stream_id, source, credentials) in output_sessions.chain(cursor_sessions) {
             let Some(output) = image_copy_capture::source_output(&source) else {
