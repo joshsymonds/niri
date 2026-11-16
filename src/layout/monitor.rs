@@ -1713,11 +1713,18 @@ impl<W: LayoutElement> Monitor<W> {
         // During a workspace switch or overview transition, keep the existing
         // bounds — see the HACK comment above for why horizontal cropping during
         // those transitions is unsafe (pixel shaders, GTK damage-tracking bug).
+        //
+        // A fullscreen window rendered above the top layer covers the whole output,
+        // bar included, so it keeps the existing bounds too. Bars that keep their
+        // exclusive zone while a window is fullscreen (DMS does) would otherwise
+        // shrink the working area and clip the fullscreen window's edge, leaving
+        // the bar's zone showing over it.
         let scrolling_crop_bounds = compute_scrolling_crop_bounds(
             self.working_area,
             scale,
             self.workspace_switch.is_some(),
             self.overview_progress.is_some(),
+            self.render_above_top_layer(),
             crop_bounds,
         );
 
@@ -2208,14 +2215,18 @@ impl<W: LayoutElement> Monitor<W> {
 /// switch or overview transition the bounds match the caller's `transition_bounds`,
 /// preserving the existing infinite-horizontal-clipped-vertical crop documented by
 /// the HACK comment in `render_workspaces` (cutting pixel shaders / GTK damage).
+/// The same holds while a fullscreen window renders above the top layer: it covers
+/// the whole output, so the working area (which still excludes a bar's exclusive
+/// zone) must not clip it.
 fn compute_scrolling_crop_bounds(
     working_area: Rectangle<f64, Logical>,
     scale: f64,
     workspace_switch_active: bool,
     overview_active: bool,
+    fullscreen_above_top_layer: bool,
     transition_bounds: Rectangle<i32, Physical>,
 ) -> Rectangle<i32, Physical> {
-    if workspace_switch_active || overview_active {
+    if workspace_switch_active || overview_active || fullscreen_above_top_layer {
         return transition_bounds;
     }
 
@@ -2253,6 +2264,7 @@ mod tests {
             1.0,
             /* workspace_switch_active */ false,
             /* overview_active */ false,
+            /* fullscreen_above_top_layer */ false,
             transition_bounds,
         );
 
@@ -2270,6 +2282,7 @@ mod tests {
             1.0,
             /* workspace_switch_active */ true,
             /* overview_active */ false,
+            /* fullscreen_above_top_layer */ false,
             transition_bounds,
         );
 
@@ -2286,6 +2299,26 @@ mod tests {
             1.0,
             /* workspace_switch_active */ false,
             /* overview_active */ true,
+            /* fullscreen_above_top_layer */ false,
+            transition_bounds,
+        );
+
+        assert_eq!(bounds, transition_bounds);
+    }
+
+    #[test]
+    fn scrolling_crop_with_fullscreen_above_top_layer_matches_transition_bounds() {
+        // A left bar keeps its exclusive zone while a window is fullscreen: the
+        // fullscreen window must still cover the whole output, not the working area.
+        let working_area = Rectangle::new(Point::from((44.0, 0.0)), Size::from((2516.0, 1440.0)));
+        let transition_bounds = transition_bounds_for_view_h(1440.0, 1.0);
+
+        let bounds = compute_scrolling_crop_bounds(
+            working_area,
+            1.0,
+            /* workspace_switch_active */ false,
+            /* overview_active */ false,
+            /* fullscreen_above_top_layer */ true,
             transition_bounds,
         );
 
@@ -2299,8 +2332,14 @@ mod tests {
         let working_area = Rectangle::new(Point::from((80.0, 0.0)), Size::from((1840.0, 1080.0)));
         let transition_bounds = transition_bounds_for_view_h(1080.0, 1.5);
 
-        let bounds =
-            compute_scrolling_crop_bounds(working_area, 1.5, false, false, transition_bounds);
+        let bounds = compute_scrolling_crop_bounds(
+            working_area,
+            1.5,
+            false,
+            false,
+            false,
+            transition_bounds,
+        );
 
         let expected = Rectangle::new(Point::from((120, 0)), Size::from((2760, 1620)));
         assert_eq!(bounds, expected);
@@ -2313,8 +2352,14 @@ mod tests {
         let working_area = Rectangle::new(Point::from((1920.0, 0.0)), Size::from((0.0, 1080.0)));
         let transition_bounds = transition_bounds_for_view_h(1080.0, 1.0);
 
-        let bounds =
-            compute_scrolling_crop_bounds(working_area, 1.0, false, false, transition_bounds);
+        let bounds = compute_scrolling_crop_bounds(
+            working_area,
+            1.0,
+            false,
+            false,
+            false,
+            transition_bounds,
+        );
 
         // Width should be zero, not negative.
         assert_eq!(bounds.size.w, 0);
