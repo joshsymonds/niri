@@ -1602,6 +1602,9 @@ pub enum CastKind {
     ///
     /// A client capturing both an output and the cursor creates two sessions, which are reported
     /// as two `Cast`s sharing one [`session_id`](Cast::session_id).
+    ///
+    /// A session is reported once it requests its second frame. Sessions requesting only one
+    /// frame are treated as regular screenshots (e.g. grim) and not reported as screencasts.
     ExtImageCopyCapture,
 }
 
